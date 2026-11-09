@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1656c4"/><stop offset="0.55" stop-color="#0b3d91"/><stop offset="1" stop-color="#06204f"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.3" cy="0.22" r="0.75">
+      <stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#dce9ff"/>
+    </linearGradient>
+    <linearGradient id="echo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7fb6ff" stop-opacity=".0"/><stop offset=".35" stop-color="#7fb6ff" stop-opacity=".75"/><stop offset="1" stop-color="#7fb6ff" stop-opacity=".9"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#bfe0ff" stop-opacity="0"/><stop offset="1" stop-color="#bfe0ff" stop-opacity=".95"/>
+    </linearGradient>
+    <linearGradient id="puckTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3340"/><stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#sheen)"/>
+  <g transform="translate(512 512) scale(.86) translate(-545 -455)">
+  <!-- echo swoosh -->
+  <path d="M 400 190 C 230 320 150 560 230 690 C 300 800 480 790 690 745 C 500 770 330 770 285 670 C 225 545 275 350 400 190 Z" fill="url(#echo)"/>
+  <!-- main stick blade -->
+  <path d="M 520 150 C 340 290 270 520 345 650 C 410 760 560 735 745 690 C 580 722 440 738 388 632 C 322 505 380 320 520 150 Z" fill="url(#blade)"/>
+  <!-- speed trails to the puck -->
+  <path d="M 470 625 L 735 588 L 738 602 Z" fill="url(#trail)"/>
+  <path d="M 400 735 L 740 690 L 742 704 Z" fill="url(#trail)" opacity=".8"/>
+  <path d="M 560 668 L 712 645 L 714 655 Z" fill="url(#trail)" opacity=".7"/>
+  <!-- puck -->
+  <g transform="translate(800 650)">
+    <ellipse cx="0" cy="38" rx="118" ry="52" fill="#05080c"/>
+    <rect x="-118" y="0" width="236" height="38" fill="#11161d"/>
+    <path d="M -118 8 Q 0 52 118 8" stroke="#2c3644" stroke-width="5" fill="none"/>
+    <ellipse cx="0" cy="0" rx="118" ry="52" fill="url(#puckTop)"/>
+    <ellipse cx="0" cy="0" rx="92" ry="38" fill="none" stroke="#7fc4ff" stroke-width="7" opacity=".85"/>
+  </g>
+  </g>
+</svg>
