@@ -1,25 +1,36 @@
 'use strict';
 /* Hockey Log — phone-first PWA. All data lives in localStorage on the device.
- * Schema (version 1):
- *   settings: { playerName, homeAddress, mapsKey, roundTrip }
- *   stadiums: [{ id, name, address, distanceKm|null, durationMin|null, distanceSource: 'google'|'manual'|null, distanceFrom }]
- *   games:    [{ id, date 'YYYY-MM-DD', type, competition, stadiumId, opponent,
- *                scoreFor|null, scoreAgainst|null, goals, assists, notes, createdAt }]
+ * Schema (version 2):
+ *   settings: { playerName, homeAddress, homeLat, homeLng, mapsKey, roundTrip }
+ *   stadiums: [{ id, name, address, lat, lng, distanceKm, durationMin, distanceSource: 'google'|'manual'|null, distanceFrom }]
+ *   teams:    [{ id, name, logo: dataURL|null }]
+ *   days:     [{ id, date 'YYYY-MM-DD', type, competition, stadiumId,
+ *                matches: [{ teamId, goals, assists }], notes, createdAt }]
+ * A "day" is one game day at one rink (a league game or a whole tournament day with several opponents).
+ * Version 1 (one entry per game, with team scores) is migrated on load/import.
  */
 
 const STORAGE_KEY = 'hockeylog.v1';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const GAME_TYPES = ['League', 'Tournament / Cup', 'Friendly'];
+const LOGO_PX = 96;
 
 // ---------- storage ----------
 function emptyDb() {
-  return { version: SCHEMA_VERSION, settings: { playerName: '', homeAddress: '', mapsKey: '', roundTrip: true }, stadiums: [], games: [] };
+  return {
+    version: SCHEMA_VERSION,
+    settings: { playerName: '', homeAddress: '', homeLat: null, homeLng: null, mapsKey: '', roundTrip: true },
+    stadiums: [], teams: [], days: [],
+  };
 }
+let needsMigrationSave = false;
 function loadDb() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return emptyDb();
-    return normalizeDb(JSON.parse(raw));
+    const parsed = JSON.parse(raw);
+    needsMigrationSave = (parsed.version || 1) < SCHEMA_VERSION;
+    return normalizeDb(parsed);
   } catch (e) {
     console.error('Could not load data', e);
     alert('Could not read saved data: ' + e.message);
@@ -29,39 +40,74 @@ function loadDb() {
 function saveDb() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    return true;
   } catch (e) {
-    alert('Saving failed (' + e.message + '). Export a backup from Settings.');
+    alert('Saving failed (' + e.message + '). Phone storage may be full: try smaller logos, and export a backup from Settings.');
+    return false;
   }
 }
+
+const num = (v) => (v === '' || v === null || v === undefined || isNaN(+v) ? null : +v);
+const count = (v) => Math.max(0, Math.floor(num(v) || 0));
+
+/** Convert v1 data (one record per game, opponent as text) to v2 game days. */
+function migrateV1(d) {
+  const teams = new Map();
+  const teamId = (name) => {
+    const k = teamKey(name);
+    if (!teams.has(k)) teams.set(k, { id: uid(), name: name.trim(), logo: null });
+    return teams.get(k).id;
+  };
+  const days = new Map();
+  for (const g of d.games || []) {
+    if (!g || !/^\d{4}-\d{2}-\d{2}$/.test(g.date)) continue;
+    const key = [g.date, g.stadiumId || '', g.type || '', g.competition || ''].join('|');
+    if (!days.has(key)) {
+      days.set(key, { id: uid(), date: g.date, type: g.type, competition: g.competition || '', stadiumId: g.stadiumId || null, matches: [], notes: '', createdAt: g.createdAt });
+    }
+    const day = days.get(key);
+    day.matches.push({ teamId: g.opponent && g.opponent.trim() ? teamId(g.opponent) : null, goals: g.goals, assists: g.assists });
+    if (g.notes) day.notes = day.notes ? day.notes + '\n' + g.notes : g.notes;
+  }
+  return { ...d, version: 2, teams: [...teams.values()], days: [...days.values()] };
+}
+
 /** Validate and fill defaults; throws on data that is not a Hockey Log export. */
 function normalizeDb(d) {
-  if (!d || typeof d !== 'object' || !Array.isArray(d.games) || !Array.isArray(d.stadiums)) {
-    throw new Error('Not a Hockey Log data file');
-  }
+  if (!d || typeof d !== 'object' || !Array.isArray(d.stadiums)) throw new Error('Not a Hockey Log data file');
   if (d.version > SCHEMA_VERSION) throw new Error('File was made by a newer app version');
+  if (!d.version || d.version < 2) {
+    if (!Array.isArray(d.games)) throw new Error('Not a Hockey Log data file');
+    d = migrateV1(d);
+  }
+  if (!Array.isArray(d.days) || !Array.isArray(d.teams)) throw new Error('Not a Hockey Log data file');
   const base = emptyDb();
-  const num = (v) => (v === '' || v === null || v === undefined || isNaN(+v) ? null : +v);
+  const teams = d.teams.filter((t) => t && t.id && t.name).map((t) => ({
+    id: String(t.id), name: String(t.name).trim(),
+    logo: typeof t.logo === 'string' && t.logo.startsWith('data:image/') ? t.logo : null,
+  }));
+  const teamIds = new Set(teams.map((t) => t.id));
   return {
     version: SCHEMA_VERSION,
     settings: { ...base.settings, ...(d.settings || {}) },
     stadiums: d.stadiums.filter((s) => s && s.id && s.name).map((s) => ({
       id: String(s.id), name: String(s.name), address: String(s.address || ''),
+      lat: num(s.lat), lng: num(s.lng),
       distanceKm: num(s.distanceKm), durationMin: num(s.durationMin),
       distanceSource: s.distanceSource || null, distanceFrom: s.distanceFrom || null,
     })),
-    games: d.games.filter((g) => g && g.id && /^\d{4}-\d{2}-\d{2}$/.test(g.date)).map((g) => ({
-      id: String(g.id), date: g.date, type: GAME_TYPES.includes(g.type) ? g.type : 'League',
-      competition: String(g.competition || ''), stadiumId: g.stadiumId ? String(g.stadiumId) : null,
-      opponent: String(g.opponent || '').trim(),
-      scoreFor: num(g.scoreFor), scoreAgainst: num(g.scoreAgainst),
-      goals: Math.max(0, num(g.goals) || 0), assists: Math.max(0, num(g.assists) || 0),
-      notes: String(g.notes || ''), createdAt: g.createdAt || new Date().toISOString(),
+    teams,
+    days: d.days.filter((x) => x && x.id && /^\d{4}-\d{2}-\d{2}$/.test(x.date)).map((x) => ({
+      id: String(x.id), date: x.date, type: GAME_TYPES.includes(x.type) ? x.type : 'League',
+      competition: String(x.competition || ''), stadiumId: x.stadiumId ? String(x.stadiumId) : null,
+      matches: (Array.isArray(x.matches) ? x.matches : []).map((m) => ({
+        teamId: m && teamIds.has(String(m.teamId)) ? String(m.teamId) : null,
+        goals: count(m && m.goals), assists: count(m && m.assists),
+      })),
+      notes: String(x.notes || ''), createdAt: x.createdAt || new Date().toISOString(),
     })),
   };
 }
-
-let db = loadDb();
-if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // ---------- helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -71,7 +117,10 @@ const today = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getT
 const fmtDate = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 const fmtKm = (km) => (km == null ? '–' : km.toLocaleString(undefined, { maximumFractionDigits: km < 100 ? 1 : 0 }) + ' km');
 const stadiumById = (id) => db.stadiums.find((s) => s.id === id);
+const teamById = (id) => db.teams.find((t) => t.id === id);
 const teamKey = (name) => name.trim().toLowerCase().replace(/\s+/g, ' ');
+const dayTotals = (d) => d.matches.reduce((a, m) => ({ goals: a.goals + m.goals, assists: a.assists + m.assists }), { goals: 0, assists: 0 });
+
 /** Hockey season runs Aug–Jul, labelled e.g. "2026/27". */
 function seasonOf(iso) {
   const y = +iso.slice(0, 4), m = +iso.slice(5, 7);
@@ -80,23 +129,52 @@ function seasonOf(iso) {
 }
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2200);
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2400);
 }
-function uniqueSorted(values) {
-  const seen = new Map();
-  for (const v of values) if (v && v.trim()) seen.set(teamKey(v), v.trim());
-  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+function findOrCreateTeam(name) {
+  const k = teamKey(name);
+  let t = db.teams.find((x) => teamKey(x.name) === k);
+  if (!t) { t = { id: uid(), name: name.trim(), logo: null }; db.teams.push(t); }
+  return t;
+}
+/** Team logo, or a coloured circle with initials when no logo was added. */
+function teamBadge(team, size = 28) {
+  if (!team) return `<span class="logo" style="width:${size}px;height:${size}px"></span>`;
+  if (team.logo) return `<img class="logo" src="${esc(team.logo)}" alt="" width="${size}" height="${size}">`;
+  let h = 0; for (const c of team.name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  const initials = team.name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  return `<span class="logo initials" style="width:${size}px;height:${size}px;background:hsl(${h} 55% 42%);font-size:${Math.round(size * 0.38)}px">${esc(initials)}</span>`;
+}
+/** Read an image file, scale it to fit LOGO_PX square, return a PNG data URL. */
+function imageFileToLogo(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = c.height = LOGO_PX;
+      const s = Math.min(LOGO_PX / img.width, LOGO_PX / img.height);
+      const w = img.width * s, h = img.height * s;
+      c.getContext('2d').drawImage(img, (LOGO_PX - w) / 2, (LOGO_PX - h) / 2, w, h);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/png'));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read this image')); };
+    img.src = url;
+  });
 }
 
+let db = loadDb();
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+
 // ---------- Google distance ----------
-/** Driving distance via Google Routes API (computeRoutes). Returns { km, minutes }. */
-async function fetchDrivingDistance(fromAddress, toAddress, apiKey) {
+/** Driving distance + endpoint coordinates via Google Routes API (computeRoutes). */
+async function fetchDrivingRoute(fromAddress, toAddress, apiKey) {
   const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': apiKey,
-      'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration',
+      'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.legs.startLocation,routes.legs.endLocation',
     },
     body: JSON.stringify({ origin: { address: fromAddress }, destination: { address: toAddress }, travelMode: 'DRIVE' }),
   });
@@ -104,7 +182,13 @@ async function fetchDrivingDistance(fromAddress, toAddress, apiKey) {
   if (!res.ok) throw new Error(body.error?.message || `HTTP ${res.status}`);
   const route = body.routes?.[0];
   if (!route || route.distanceMeters == null) throw new Error('No driving route found for this address');
-  return { km: route.distanceMeters / 1000, minutes: route.duration ? Math.round(parseInt(route.duration, 10) / 60) : null };
+  const leg = route.legs?.[0] || {};
+  const ll = (loc) => (loc?.latLng ? { lat: loc.latLng.latitude, lng: loc.latLng.longitude } : null);
+  return {
+    km: route.distanceMeters / 1000,
+    minutes: route.duration ? Math.round(parseInt(route.duration, 10) / 60) : null,
+    from: ll(leg.startLocation), to: ll(leg.endLocation),
+  };
 }
 async function updateStadiumDistance(stadium, { quiet = false } = {}) {
   const { homeAddress, mapsKey } = db.settings;
@@ -113,8 +197,10 @@ async function updateStadiumDistance(stadium, { quiet = false } = {}) {
     return false;
   }
   try {
-    const r = await fetchDrivingDistance(homeAddress, stadium.address, mapsKey);
+    const r = await fetchDrivingRoute(homeAddress, stadium.address, mapsKey);
     Object.assign(stadium, { distanceKm: Math.round(r.km * 10) / 10, durationMin: r.minutes, distanceSource: 'google', distanceFrom: homeAddress });
+    if (r.to) Object.assign(stadium, r.to);
+    if (r.from) { db.settings.homeLat = r.from.lat; db.settings.homeLng = r.from.lng; }
     saveDb();
     if (!quiet) toast(`${stadium.name}: ${fmtKm(stadium.distanceKm)}`);
     return true;
@@ -125,53 +211,99 @@ async function updateStadiumDistance(stadium, { quiet = false } = {}) {
 }
 
 // ---------- stats ----------
-function computeStats(games) {
-  const days = new Set(games.map((g) => g.date));
-  const totals = games.reduce((a, g) => ({ goals: a.goals + g.goals, assists: a.assists + g.assists }), { goals: 0, assists: 0 });
-  let w = 0, l = 0, t = 0;
-  for (const g of games) {
-    if (g.scoreFor == null || g.scoreAgainst == null) continue;
-    if (g.scoreFor > g.scoreAgainst) w++; else if (g.scoreFor < g.scoreAgainst) l++; else t++;
+function computeStats(days) {
+  const dates = new Set(days.map((d) => d.date));
+  let goals = 0, assists = 0;
+  const opp = new Map(), rinks = new Map(), byType = new Map();
+  const trips = new Set();
+  for (const d of days) {
+    const t = dayTotals(d);
+    goals += t.goals; assists += t.assists;
+    const b = byType.get(d.type) || { days: new Set(), goals: 0, assists: 0 };
+    b.days.add(d.date); b.goals += t.goals; b.assists += t.assists; byType.set(d.type, b);
+    for (const m of d.matches) {
+      if (!m.teamId) continue;
+      const o = opp.get(m.teamId) || { teamId: m.teamId, days: new Set(), goals: 0, assists: 0 };
+      o.days.add(d.date); o.goals += m.goals; o.assists += m.assists; opp.set(m.teamId, o);
+    }
+    if (d.stadiumId) {
+      trips.add(`${d.date}|${d.stadiumId}`);
+      const r = rinks.get(d.stadiumId) || { id: d.stadiumId, days: new Set() };
+      r.days.add(d.date); rinks.set(d.stadiumId, r);
+    }
   }
-
-  const opp = new Map();
-  for (const g of games) {
-    if (!g.opponent) continue;
-    const k = teamKey(g.opponent);
-    const o = opp.get(k) || { name: g.opponent, games: 0, goals: 0, assists: 0 };
-    o.games++; o.goals += g.goals; o.assists += g.assists;
-    opp.set(k, o);
-  }
-
-  // A "trip" is one game day at one rink: several games at the same rink on one day = one drive.
-  const trips = new Map();
-  for (const g of games) if (g.stadiumId) trips.set(`${g.date}|${g.stadiumId}`, g.stadiumId);
-  const rinks = new Map();
-  for (const g of games) {
-    if (!g.stadiumId) continue;
-    const r = rinks.get(g.stadiumId) || { id: g.stadiumId, days: 0, games: 0 };
-    r.games++; rinks.set(g.stadiumId, r);
-  }
+  // One trip = one game day at one rink.
   const factor = db.settings.roundTrip ? 2 : 1;
   let km = 0, missing = 0;
-  for (const sid of trips.values()) {
-    rinks.get(sid).days++;
-    const s = stadiumById(sid);
+  for (const key of trips) {
+    const s = stadiumById(key.split('|')[1]);
     if (s && s.distanceKm != null) km += s.distanceKm * factor; else missing++;
   }
-
-  const byType = new Map();
-  for (const g of games) {
-    const b = byType.get(g.type) || { games: 0, days: new Set(), goals: 0, assists: 0 };
-    b.games++; b.days.add(g.date); b.goals += g.goals; b.assists += g.assists; byType.set(g.type, b);
-  }
-
   return {
-    games: games.length, days: days.size, ...totals, points: totals.goals + totals.assists, w, l, t,
-    opponents: [...opp.values()].sort((a, b) => (b.goals + b.assists) - (a.goals + a.assists) || b.games - a.games || a.name.localeCompare(b.name)),
-    rinks: [...rinks.values()].sort((a, b) => b.days - a.days || b.games - a.games),
+    days: dates.size, goals, assists, points: goals + assists,
+    opponents: [...opp.values()].sort((a, b) => (b.goals + b.assists) - (a.goals + a.assists) || b.days.size - a.days.size),
+    rinks: [...rinks.values()].sort((a, b) => b.days.size - a.days.size),
     trips: trips.size, km, missing, byType,
   };
+}
+
+// ---------- map ----------
+let leafletMap = null;
+/** Points of a quadratic Bézier curve from a to b, bowed sideways by `bend` of its length. */
+function curvePoints(a, b, bend = 0.22, steps = 32) {
+  const k = Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180); // keep the bow symmetric on screen
+  const dx = (b.lng - a.lng) * k, dy = b.lat - a.lat;
+  const c = { x: a.lng * k + dx / 2 - dy * bend, y: a.lat + dy / 2 + dx * bend };
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps, u = 1 - t;
+    const x = u * u * a.lng * k + 2 * u * t * c.x + t * t * b.lng * k;
+    const y = u * u * a.lat + 2 * u * t * c.y + t * t * b.lat;
+    pts.push([y, x / k]);
+  }
+  return pts;
+}
+function renderMap(el, rinkStats) {
+  if (leafletMap) { leafletMap.remove(); leafletMap = null; }
+  if (typeof L === 'undefined') { el.innerHTML = '<p class="hint">Map could not load.</p>'; return; }
+  const st = db.settings;
+  const home = st.homeLat != null ? { lat: st.homeLat, lng: st.homeLng } : null;
+  const placed = rinkStats.map((r) => ({ r, s: stadiumById(r.id) })).filter((x) => x.s && x.s.lat != null);
+  if (!placed.length) {
+    el.outerHTML = '<p class="hint">Rinks appear on the map after their distance is looked up with Google Maps (Rinks tab).</p>';
+    return;
+  }
+  leafletMap = L.map(el, { zoomControl: true, attributionControl: true, scrollWheelZoom: false });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(leafletMap);
+  const bounds = [];
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#0b3d91';
+  if (home) {
+    L.marker([home.lat, home.lng], { icon: L.divIcon({ className: 'pin home-pin', html: '🏠', iconSize: [30, 30] }) }).addTo(leafletMap).bindPopup('Home');
+    bounds.push([home.lat, home.lng]);
+  }
+  const maxDays = Math.max(...placed.map((x) => x.r.days.size));
+  for (const { r, s } of placed) {
+    const size = 26 + Math.round(14 * (r.days.size / maxDays));
+    L.marker([s.lat, s.lng], { icon: L.divIcon({ className: 'pin rink-pin', html: `<span>${r.days.size}</span>`, iconSize: [size, size] }) })
+      .addTo(leafletMap)
+      .bindPopup(`<b>${esc(s.name)}</b><br>${r.days.size} game day${r.days.size > 1 ? 's' : ''} · ${fmtKm(s.distanceKm)}`);
+    bounds.push([s.lat, s.lng]);
+    if (!home) continue;
+    const pts = curvePoints(home, s);
+    L.polyline(pts, { color: accent, weight: 3, opacity: 0.85 }).addTo(leafletMap);
+    // Arrowhead near the end, rotated along the curve's direction on screen.
+    const i = Math.round(pts.length * 0.86), p = pts[i], q = pts[i - 1];
+    const k = Math.cos(p[0] * Math.PI / 180);
+    const angle = Math.atan2(-(p[0] - q[0]), (p[1] - q[1]) * k) * 180 / Math.PI;
+    L.marker(p, { interactive: false, icon: L.divIcon({ className: 'arrowhead', html: `<span style="transform:rotate(${angle}deg);color:${accent}">➤</span>`, iconSize: [18, 18] }) }).addTo(leafletMap);
+    if (s.distanceKm != null) {
+      L.marker(pts[Math.floor(pts.length / 2)], { interactive: false, icon: L.divIcon({ className: 'km-label', html: `<span>${esc(fmtKm(s.distanceKm))}</span>`, iconSize: null }) }).addTo(leafletMap);
+    }
+  }
+  if (bounds.length === 1) leafletMap.setView(bounds[0], 12);
+  else leafletMap.fitBounds(bounds, { padding: [36, 36] });
 }
 
 // ---------- views ----------
@@ -179,21 +311,21 @@ const state = { tab: 'games', editing: null, filterSeason: 'all', filterType: 'a
 
 function setTab(tab, editing = null) {
   state.tab = tab; state.editing = editing;
-  document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab || (tab === 'game' && b.dataset.tab === 'games')));
+  document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab || (tab === 'day' && b.dataset.tab === 'games')));
   render();
   window.scrollTo(0, 0);
 }
 
 function render() {
-  const titles = { games: 'Games', game: state.editing === 'new' ? 'New game' : 'Edit game', stats: 'Stats', stadiums: 'Rinks', settings: 'Settings' };
+  const titles = { games: 'Game days', day: state.editing === 'new' ? 'New game day' : 'Edit game day', stats: 'Stats', teams: 'Teams', stadiums: 'Rinks', settings: 'Settings' };
   $('#title').textContent = titles[state.tab];
   $('#addBtn').hidden = state.tab !== 'games';
-  const view = $('#view');
-  ({ games: renderGames, game: renderGameForm, stats: renderStats, stadiums: renderStadiums, settings: renderSettings })[state.tab](view);
+  if (leafletMap && state.tab !== 'stats') { leafletMap.remove(); leafletMap = null; }
+  ({ games: renderDays, day: renderDayForm, stats: renderStats, teams: renderTeams, stadiums: renderStadiums, settings: renderSettings })[state.tab]($('#view'));
 }
 
-function filterControls(games) {
-  const seasons = [...new Set(games.map((g) => seasonOf(g.date)))].sort().reverse();
+function filterControls() {
+  const seasons = [...new Set(db.days.map((d) => seasonOf(d.date)))].sort().reverse();
   return `<div class="filters">
     <select id="fSeason"><option value="all">All seasons</option>${seasons.map((s) => `<option ${s === state.filterSeason ? 'selected' : ''}>${s}</option>`).join('')}</select>
     <select id="fType"><option value="all">All types</option>${GAME_TYPES.map((t) => `<option ${t === state.filterType ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>
@@ -203,105 +335,128 @@ function bindFilters() {
   $('#fSeason').onchange = (e) => { state.filterSeason = e.target.value; render(); };
   $('#fType').onchange = (e) => { state.filterType = e.target.value; render(); };
 }
-function filteredGames() {
-  return db.games.filter((g) => (state.filterSeason === 'all' || seasonOf(g.date) === state.filterSeason) && (state.filterType === 'all' || g.type === state.filterType));
+function filteredDays() {
+  return db.days.filter((d) => (state.filterSeason === 'all' || seasonOf(d.date) === state.filterSeason) && (state.filterType === 'all' || d.type === state.filterType));
 }
 
-function renderGames(view) {
-  if (!db.games.length) {
-    view.innerHTML = `<div class="empty">No games yet.<br>Tap ＋ to add the first one.${db.settings.homeAddress ? '' : '<br><br>Tip: set your home address in Settings so driving distances can be calculated.'}</div>`;
+function renderDays(view) {
+  if (!db.days.length) {
+    view.innerHTML = `<div class="empty">No game days yet.<br>Tap ＋ to add the first one.${db.settings.homeAddress ? '' : '<br><br>Tip: set your home address in Settings so driving distances can be calculated.'}</div>`;
     return;
   }
-  const games = filteredGames().sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
-  let html = filterControls(db.games), lastDate = null;
-  for (const g of games) {
-    if (g.date !== lastDate) { html += `<div class="day-head">${esc(fmtDate(g.date))}</div>`; lastDate = g.date; }
-    const s = stadiumById(g.stadiumId);
-    const hasScore = g.scoreFor != null && g.scoreAgainst != null;
-    const cls = hasScore ? (g.scoreFor > g.scoreAgainst ? 'w' : g.scoreFor < g.scoreAgainst ? 'l' : '') : '';
-    html += `<div class="card game" data-id="${esc(g.id)}">
-      <div class="main"><div class="opp">vs ${esc(g.opponent || '?')}</div>
-        <div class="meta"><span class="badge">${esc(g.type)}</span>${esc(g.competition)}${g.competition && s ? ' · ' : ''}${esc(s ? s.name : '')}</div></div>
-      <div class="right">${hasScore ? `<div class="score ${cls}">${g.scoreFor}:${g.scoreAgainst}</div>` : ''}<div class="pts">${g.goals} G · ${g.assists} A</div></div>
+  const days = filteredDays().sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+  let html = filterControls();
+  for (const d of days) {
+    const s = stadiumById(d.stadiumId), t = dayTotals(d);
+    const teams = d.matches.map((m) => teamById(m.teamId)).filter(Boolean);
+    html += `<div class="day-head">${esc(fmtDate(d.date))}</div>
+    <div class="card game" data-id="${esc(d.id)}">
+      <div class="main">
+        <div class="meta"><span class="badge">${esc(d.type)}</span>${esc(d.competition)}${d.competition && s ? ' · ' : ''}${esc(s ? s.name : '')}</div>
+        <div class="opps">${teams.map((tm) => `<span class="opp-chip">${teamBadge(tm, 20)}${esc(tm.name)}</span>`).join('') || '<span class="hint">no opponent</span>'}</div>
+      </div>
+      <div class="right"><div class="score">${t.goals} G</div><div class="pts">${t.assists} A</div></div>
     </div>`;
   }
-  if (!games.length) html += '<div class="empty">No games match these filters.</div>';
+  if (!days.length) html += '<div class="empty">No game days match these filters.</div>';
   view.innerHTML = html;
   bindFilters();
-  view.querySelectorAll('.game').forEach((el) => (el.onclick = () => setTab('game', el.dataset.id)));
+  view.querySelectorAll('.game').forEach((el) => (el.onclick = () => setTab('day', el.dataset.id)));
 }
 
-function stepper(id, value) {
-  return `<div class="stepper"><button type="button" data-step="${id}" data-d="-1">−</button><input id="${id}" type="number" inputmode="numeric" min="0" value="${value}"><button type="button" data-step="${id}" data-d="1">＋</button></div>`;
+function stepper(cls, value) {
+  return `<div class="stepper"><button type="button" data-d="-1">−</button><input class="${cls}" type="number" inputmode="numeric" min="0" value="${value}"><button type="button" data-d="1">＋</button></div>`;
 }
-
-function renderGameForm(view) {
-  const isNew = state.editing === 'new';
-  const last = [...db.games].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-  // New games prefill date/type/competition/rink from the most recent entry: a cup day usually has several games.
-  const g = isNew
-    ? { date: last?.date === today() ? last.date : today(), type: last?.type || 'League', competition: last?.date === today() ? last.competition : '', stadiumId: last?.date === today() ? last.stadiumId : '', opponent: '', scoreFor: null, scoreAgainst: null, goals: 0, assists: 0, notes: '' }
-    : db.games.find((x) => x.id === state.editing);
-  if (!g) return setTab('games');
-  const stadiums = [...db.stadiums].sort((a, b) => a.name.localeCompare(b.name));
-  view.innerHTML = `<form id="gameForm" autocomplete="off">
+function matchRow(m = { teamId: null, goals: 0, assists: 0 }) {
+  const t = teamById(m.teamId);
+  return `<div class="match-row card">
+    <div class="inline"><input class="m-team" list="teamList" placeholder="Opponent team" value="${esc(t ? t.name : '')}"><button type="button" class="remove" aria-label="Remove opponent">✕</button></div>
     <div class="row">
-      <div><label for="date">Date</label><input id="date" type="date" required value="${esc(g.date)}"></div>
-      <div><label for="type">Type</label><select id="type">${GAME_TYPES.map((t) => `<option ${t === g.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+      <div><label>Goals</label>${stepper('m-goals', m.goals)}</div>
+      <div><label>Assists</label>${stepper('m-assists', m.assists)}</div>
+    </div>
+  </div>`;
+}
+
+function renderDayForm(view) {
+  const isNew = state.editing === 'new';
+  const last = [...db.days].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const d = isNew
+    ? { date: today(), type: last?.type || 'League', competition: '', stadiumId: '', matches: [{ teamId: null, goals: 0, assists: 0 }], notes: '' }
+    : db.days.find((x) => x.id === state.editing);
+  if (!d) return setTab('games');
+  const stadiums = [...db.stadiums].sort((a, b) => a.name.localeCompare(b.name));
+  const comps = [...new Set(db.days.map((x) => x.competition).filter(Boolean))].sort();
+  view.innerHTML = `<form id="dayForm" autocomplete="off">
+    <div class="row">
+      <div><label for="date">Date</label><input id="date" type="date" required value="${esc(d.date)}"></div>
+      <div><label for="type">Type</label><select id="type">${GAME_TYPES.map((t) => `<option ${t === d.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
     </div>
     <label for="competition">League / tournament name</label>
-    <input id="competition" list="compList" value="${esc(g.competition)}" placeholder="e.g. U11 Regional League">
-    <datalist id="compList">${uniqueSorted(db.games.map((x) => x.competition)).map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+    <input id="competition" list="compList" value="${esc(d.competition)}" placeholder="e.g. U11 Regional League">
+    <datalist id="compList">${comps.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
     <label for="stadium">Rink</label>
-    <select id="stadium"><option value="">— choose —</option>${stadiums.map((s) => `<option value="${esc(s.id)}" ${s.id === g.stadiumId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}<option value="__new">＋ New rink…</option></select>
+    <select id="stadium"><option value="">— choose —</option>${stadiums.map((s) => `<option value="${esc(s.id)}" ${s.id === d.stadiumId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}<option value="__new">＋ New rink…</option></select>
     <div id="newRink" hidden>
       <label for="rinkName">Rink name</label><input id="rinkName" placeholder="e.g. Eissporthalle Frankfurt">
       <label for="rinkAddr">Address (for Google Maps)</label><input id="rinkAddr" placeholder="Street, city">
     </div>
-    <label for="opponent">Opponent</label>
-    <input id="opponent" list="oppList" required value="${esc(g.opponent)}" placeholder="Team name">
-    <datalist id="oppList">${uniqueSorted(db.games.map((x) => x.opponent)).map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
-    <div class="row">
-      <div><label for="scoreFor">Our score</label><input id="scoreFor" type="number" inputmode="numeric" min="0" value="${g.scoreFor ?? ''}"></div>
-      <div><label for="scoreAgainst">Their score</label><input id="scoreAgainst" type="number" inputmode="numeric" min="0" value="${g.scoreAgainst ?? ''}"></div>
-    </div>
-    <div class="row">
-      <div><label for="goals">Goals</label>${stepper('goals', g.goals)}</div>
-      <div><label for="assists">Assists</label>${stepper('assists', g.assists)}</div>
-    </div>
-    <label for="notes">Notes</label><textarea id="notes">${esc(g.notes)}</textarea>
+    <h2>Opponents</h2>
+    <datalist id="teamList">${[...db.teams].sort((a, b) => a.name.localeCompare(b.name)).map((t) => `<option value="${esc(t.name)}">`).join('')}</datalist>
+    <div id="matches">${(d.matches.length ? d.matches : [{ teamId: null, goals: 0, assists: 0 }]).map(matchRow).join('')}</div>
+    <button class="btn secondary" type="button" id="addMatch">＋ Add opponent</button>
+    <p class="hint" id="dayTotal"></p>
+    <label for="notes">Notes</label><textarea id="notes">${esc(d.notes)}</textarea>
     <button class="btn" type="submit">Save</button>
-    ${isNew ? '' : '<button class="btn danger" type="button" id="delBtn">Delete game</button>'}
+    ${isNew ? '' : '<button class="btn danger" type="button" id="delBtn">Delete game day</button>'}
     <button class="btn secondary" type="button" id="cancelBtn">Cancel</button>
   </form>`;
 
-  view.querySelectorAll('[data-step]').forEach((b) => (b.onclick = () => {
-    const inp = $('#' + b.dataset.step); inp.value = Math.max(0, (+inp.value || 0) + +b.dataset.d);
-  }));
+  const form = $('#dayForm');
+  const updateTotal = () => {
+    let g = 0, a = 0;
+    form.querySelectorAll('.match-row').forEach((r) => { g += count(r.querySelector('.m-goals').value); a += count(r.querySelector('.m-assists').value); });
+    $('#dayTotal').textContent = `Day total: ${g} goals · ${a} assists`;
+  };
+  form.addEventListener('click', (e) => {
+    const step = e.target.closest('[data-d]');
+    if (step) { const inp = step.parentElement.querySelector('input'); inp.value = Math.max(0, count(inp.value) + +step.dataset.d); updateTotal(); }
+    const rm = e.target.closest('.remove');
+    if (rm) { rm.closest('.match-row').remove(); updateTotal(); }
+  });
+  form.addEventListener('input', updateTotal);
+  $('#addMatch').onclick = () => {
+    $('#matches').insertAdjacentHTML('beforeend', matchRow());
+    $('#matches').lastElementChild.querySelector('.m-team').focus();
+  };
+  updateTotal();
   $('#stadium').onchange = (e) => { $('#newRink').hidden = e.target.value !== '__new'; };
   $('#cancelBtn').onclick = () => setTab('games');
   if (!isNew) $('#delBtn').onclick = () => {
-    if (!confirm('Delete this game?')) return;
-    db.games = db.games.filter((x) => x.id !== g.id); saveDb(); toast('Game deleted'); setTab('games');
+    if (!confirm('Delete this game day?')) return;
+    db.days = db.days.filter((x) => x.id !== d.id); saveDb(); toast('Game day deleted'); setTab('games');
   };
 
-  $('#gameForm').onsubmit = (e) => {
+  form.onsubmit = (e) => {
     e.preventDefault();
+    const rows = [...form.querySelectorAll('.match-row')].map((r) => ({
+      name: r.querySelector('.m-team').value.trim(), goals: count(r.querySelector('.m-goals').value), assists: count(r.querySelector('.m-assists').value),
+    }));
+    if (rows.some((r) => !r.name && (r.goals || r.assists))) { toast('Enter the opponent for each row with points'); return; }
     let stadiumId = $('#stadium').value || null, newStadium = null;
     if (stadiumId === '__new') {
       const name = $('#rinkName').value.trim();
       if (!name) { toast('Enter a rink name'); return; }
-      newStadium = { id: uid(), name, address: $('#rinkAddr').value.trim(), distanceKm: null, durationMin: null, distanceSource: null, distanceFrom: null };
+      newStadium = { id: uid(), name, address: $('#rinkAddr').value.trim(), lat: null, lng: null, distanceKm: null, durationMin: null, distanceSource: null, distanceFrom: null };
       db.stadiums.push(newStadium); stadiumId = newStadium.id;
     }
-    const n = (id) => ($('#' + id).value === '' ? null : Math.max(0, parseInt($('#' + id).value, 10)));
     const data = {
       date: $('#date').value, type: $('#type').value, competition: $('#competition').value.trim(), stadiumId,
-      opponent: $('#opponent').value.trim(), scoreFor: n('scoreFor'), scoreAgainst: n('scoreAgainst'),
-      goals: n('goals') || 0, assists: n('assists') || 0, notes: $('#notes').value.trim(),
+      matches: rows.filter((r) => r.name).map((r) => ({ teamId: findOrCreateTeam(r.name).id, goals: r.goals, assists: r.assists })),
+      notes: $('#notes').value.trim(),
     };
-    if (isNew) db.games.push({ id: uid(), createdAt: new Date().toISOString(), ...data });
-    else Object.assign(g, data);
+    if (isNew) db.days.push({ id: uid(), createdAt: new Date().toISOString(), ...data });
+    else Object.assign(d, data);
     saveDb();
     toast('Saved');
     if (newStadium && newStadium.address) updateStadiumDistance(newStadium, { quiet: true });
@@ -310,51 +465,98 @@ function renderGameForm(view) {
 }
 
 function renderStats(view) {
-  if (!db.games.length) { view.innerHTML = '<div class="empty">Stats appear once you have added games.</div>'; return; }
-  const s = computeStats(filteredGames());
+  if (!db.days.length) { view.innerHTML = '<div class="empty">Stats appear once you have added game days.</div>'; return; }
+  const s = computeStats(filteredDays());
   const kpi = (v, l) => `<div class="kpi"><b>${v}</b><small>${l}</small></div>`;
-  let html = filterControls(db.games) + '<div style="height:10px"></div><div class="kpis">' +
-    kpi(s.days, 'game days') + kpi(s.games, 'games') + kpi(s.points, 'points') +
-    kpi(s.goals, 'goals') + kpi(s.assists, 'assists') + kpi(s.games ? (s.points / s.games).toFixed(2) : '–', 'points / game') +
-    '</div>';
-  if (s.w + s.l + s.t) html += `<p class="hint">Team record in games with a score: ${s.w} W · ${s.l} L · ${s.t} T</p>`;
+  let html = filterControls() + '<div style="height:10px"></div><div class="kpis four">' +
+    kpi(s.days, 'game days') + kpi(s.goals, 'goals') + kpi(s.assists, 'assists') + kpi(s.points, 'points') + '</div>';
 
-  html += `<h2>Driving</h2><div class="card"><div class="kpis" style="margin:0">${kpi(fmtKm(s.km), db.settings.roundTrip ? 'round trips' : 'one way')}${kpi(s.trips, 'trips')}${kpi(s.trips - s.missing ? fmtKm(s.km / (s.trips - s.missing)) : '–', 'per trip')}</div>
+  html += `<h2>Driving</h2><div class="card">
+    <div class="kpis" style="margin:0">${kpi(fmtKm(s.km), db.settings.roundTrip ? 'round trips' : 'one way')}${kpi(s.trips, 'trips')}${kpi(s.trips - s.missing ? fmtKm(s.km / (s.trips - s.missing)) : '–', 'per trip')}</div>
     ${s.missing ? `<p class="hint">${s.missing} trip(s) have no distance yet: check the Rinks tab.</p>` : ''}
-    <p class="hint">One trip = one game day at one rink.</p></div>`;
+    <div id="map"></div>
+  </div>`;
 
   if (s.byType.size > 1) {
-    html += '<h2>By type</h2><div class="card"><table><tr><th>Type</th><th>Days</th><th>GP</th><th>G</th><th>A</th></tr>' +
-      [...s.byType].map(([t, b]) => `<tr><td>${esc(t)}</td><td>${b.days.size}</td><td>${b.games}</td><td>${b.goals}</td><td>${b.assists}</td></tr>`).join('') + '</table></div>';
+    html += '<h2>By type</h2><div class="card"><table><tr><th>Type</th><th>Days</th><th>G</th><th>A</th></tr>' +
+      [...s.byType].map(([t, b]) => `<tr><td>${esc(t)}</td><td>${b.days.size}</td><td>${b.goals}</td><td>${b.assists}</td></tr>`).join('') + '</table></div>';
   }
 
-  html += '<h2>Opponents</h2><div class="card"><table><tr><th>Team</th><th>GP</th><th>G</th><th>A</th><th>P</th></tr>' +
-    s.opponents.map((o) => `<tr><td>${esc(o.name)}</td><td>${o.games}</td><td>${o.goals}</td><td>${o.assists}</td><td><b>${o.goals + o.assists}</b></td></tr>`).join('') + '</table></div>';
+  html += '<h2>Opponents</h2><div class="card"><table><tr><th>Team</th><th>Days</th><th>G</th><th>A</th></tr>' +
+    s.opponents.map((o) => { const t = teamById(o.teamId); return `<tr><td><span class="team-cell">${teamBadge(t, 28)}${esc(t ? t.name : '?')}</span></td><td>${o.days.size}</td><td>${o.goals}</td><td>${o.assists}</td></tr>`; }).join('') + '</table>' +
+    '<p class="hint">Add team logos in the Teams tab.</p></div>';
 
-  html += '<h2>Rinks</h2><div class="card"><table><tr><th>Rink</th><th>Days</th><th>GP</th><th>Distance</th></tr>' +
-    s.rinks.map((r) => { const st = stadiumById(r.id); return `<tr><td>${esc(st ? st.name : '?')}</td><td>${r.days}</td><td>${r.games}</td><td>${fmtKm(st?.distanceKm)}</td></tr>`; }).join('') + '</table></div>';
+  html += '<h2>Rinks</h2><div class="card"><table><tr><th>Rink</th><th>Days</th><th>Distance</th></tr>' +
+    s.rinks.map((r) => { const st = stadiumById(r.id); return `<tr><td>${esc(st ? st.name : '?')}</td><td>${r.days.size}</td><td>${fmtKm(st?.distanceKm)}</td></tr>`; }).join('') + '</table></div>';
 
   view.innerHTML = html;
   bindFilters();
+  renderMap($('#map'), s.rinks);
+}
+
+function renderTeams(view) {
+  const used = new Map();
+  for (const d of db.days) for (const m of d.matches) if (m.teamId) { if (!used.has(m.teamId)) used.set(m.teamId, new Set()); used.get(m.teamId).add(d.date); }
+  const list = [...db.teams].sort((a, b) => a.name.localeCompare(b.name));
+  let html = '<p class="hint">Tap a team to add its logo (a screenshot or photo works) or fix its name. Renaming a team to an existing name merges the two.</p>';
+  if (!list.length) html += '<div class="empty">Teams are added when you enter a game day.</div>';
+  for (const t of list) {
+    const open = state.editing === t.id;
+    html += `<div class="card"><div class="game" data-id="${esc(t.id)}"><div class="main team-cell">${teamBadge(t, 40)}<b>${esc(t.name)}</b></div>
+      <div class="right"><div class="pts">${used.get(t.id)?.size || 0} days</div></div></div>
+      ${open ? `<form class="teamForm" data-id="${esc(t.id)}">
+        <label>Name</label><input name="name" required value="${esc(t.name)}">
+        <label>Logo</label><input name="logo" type="file" accept="image/*">
+        <button class="btn" type="submit">Save</button>
+        ${t.logo ? '<button class="btn secondary" type="button" data-nologo>Remove logo</button>' : ''}
+        ${used.has(t.id) ? '' : '<button class="btn danger" type="button" data-del>Delete team</button>'}
+      </form>` : ''}</div>`;
+  }
+  view.innerHTML = html;
+  view.querySelectorAll('.game').forEach((el) => (el.onclick = () => { state.editing = state.editing === el.dataset.id ? null : el.dataset.id; render(); }));
+  const form = view.querySelector('.teamForm');
+  if (!form) return;
+  const t = teamById(form.dataset.id);
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const file = form.logo.files[0];
+    if (file) {
+      try { t.logo = await imageFileToLogo(file); } catch (err) { toast(err.message); return; }
+    }
+    const name = form.name.value.trim();
+    const other = db.teams.find((x) => x.id !== t.id && teamKey(x.name) === teamKey(name));
+    if (other) {
+      if (!confirm(`Merge "${t.name}" into "${other.name}"?`)) return;
+      for (const d of db.days) for (const m of d.matches) if (m.teamId === t.id) m.teamId = other.id;
+      if (!other.logo) other.logo = t.logo;
+      db.teams = db.teams.filter((x) => x.id !== t.id);
+    } else t.name = name;
+    if (saveDb()) toast('Saved');
+    state.editing = null; render();
+  };
+  const nologo = form.querySelector('[data-nologo]');
+  if (nologo) nologo.onclick = () => { t.logo = null; saveDb(); render(); };
+  const del = form.querySelector('[data-del]');
+  if (del) del.onclick = () => { if (confirm('Delete this team?')) { db.teams = db.teams.filter((x) => x.id !== t.id); saveDb(); state.editing = null; render(); } };
 }
 
 function renderStadiums(view) {
-  const count = new Map();
-  for (const g of db.games) if (g.stadiumId) count.set(g.stadiumId, (count.get(g.stadiumId) || 0) + 1);
+  const used = new Map();
+  for (const d of db.days) if (d.stadiumId) used.set(d.stadiumId, (used.get(d.stadiumId) || 0) + 1);
   const list = [...db.stadiums].sort((a, b) => a.name.localeCompare(b.name));
-  let html = '<p class="hint">Distances are one way from home; tap a rink to edit, set the distance by hand, or look it up again.</p>';
-  if (!list.length) html += '<div class="empty">Rinks are added when you enter a game.</div>';
+  let html = '<p class="hint">Distances are one way from home. Tap a rink to edit, set the distance by hand, or look it up again (needed for the map).</p>';
+  if (!list.length) html += '<div class="empty">Rinks are added when you enter a game day.</div>';
   for (const s of list) {
     const open = state.editing === s.id;
-    html += `<div class="card"><div class="game" data-id="${esc(s.id)}"><div class="main"><div class="opp">${esc(s.name)}</div><div class="meta">${esc(s.address || 'no address')}</div></div>
-      <div class="right"><div class="score">${fmtKm(s.distanceKm)}</div><div class="pts">${s.durationMin ? s.durationMin + ' min · ' : ''}${count.get(s.id) || 0} games</div></div></div>
+    html += `<div class="card"><div class="game" data-id="${esc(s.id)}"><div class="main"><div class="opp">${esc(s.name)}</div><div class="meta">${esc(s.address || 'no address')}${s.lat == null ? ' · not on map' : ''}</div></div>
+      <div class="right"><div class="score">${fmtKm(s.distanceKm)}</div><div class="pts">${s.durationMin ? s.durationMin + ' min · ' : ''}${used.get(s.id) || 0} days</div></div></div>
       ${open ? `<form class="rinkForm" data-id="${esc(s.id)}">
         <label>Name</label><input name="name" required value="${esc(s.name)}">
         <label>Address</label><input name="address" value="${esc(s.address)}">
         <label>One-way distance (km)</label><input name="km" type="number" step="0.1" min="0" inputmode="decimal" value="${s.distanceKm ?? ''}">
         <button class="btn" type="submit">Save</button>
         <button class="btn secondary" type="button" data-lookup>Look up with Google Maps</button>
-        ${count.get(s.id) ? '' : '<button class="btn danger" type="button" data-del>Delete rink</button>'}
+        ${used.get(s.id) ? '' : '<button class="btn danger" type="button" data-del>Delete rink</button>'}
       </form>` : ''}</div>`;
   }
   view.innerHTML = html;
@@ -366,9 +568,9 @@ function renderStadiums(view) {
     e.preventDefault();
     const addr = form.address.value.trim();
     const km = form.km.value === '' ? null : Math.max(0, +form.km.value);
-    const kmChanged = km !== s.distanceKm;
+    if (addr !== s.address) Object.assign(s, { lat: null, lng: null });
     Object.assign(s, { name: form.name.value.trim(), address: addr });
-    if (kmChanged) Object.assign(s, { distanceKm: km, durationMin: null, distanceSource: km == null ? null : 'manual', distanceFrom: db.settings.homeAddress });
+    if (km !== s.distanceKm) Object.assign(s, { distanceKm: km, durationMin: null, distanceSource: km == null ? null : 'manual', distanceFrom: db.settings.homeAddress });
     saveDb(); toast('Saved'); state.editing = null; render();
   };
   form.querySelector('[data-lookup]').onclick = async (e) => {
@@ -397,12 +599,14 @@ function renderSettings(view) {
   <button class="btn secondary" id="exportBtn">Export data (JSON)</button>
   <button class="btn secondary" id="importBtn">Import data…</button>
   <input type="file" id="importFile" accept="application/json,.json" hidden>
-  <p class="hint">${db.games.length} games · ${db.stadiums.length} rinks</p>`;
+  <p class="hint">${db.days.length} game days · ${db.teams.length} teams · ${db.stadiums.length} rinks</p>`;
 
   $('#setForm').onsubmit = (e) => {
     e.preventDefault();
-    const homeChanged = $('#home').value.trim() !== st.homeAddress;
-    Object.assign(st, { playerName: $('#playerName').value.trim(), homeAddress: $('#home').value.trim(), mapsKey: $('#key').value.trim(), roundTrip: $('#roundTrip').checked });
+    const home = $('#home').value.trim();
+    const homeChanged = home !== st.homeAddress;
+    Object.assign(st, { playerName: $('#playerName').value.trim(), homeAddress: home, mapsKey: $('#key').value.trim(), roundTrip: $('#roundTrip').checked });
+    if (homeChanged) Object.assign(st, { homeLat: null, homeLng: null });
     saveDb();
     toast(homeChanged && db.stadiums.some((s) => s.distanceSource === 'google') ? 'Saved. Home changed: recalculate distances.' : 'Settings saved');
   };
@@ -430,7 +634,7 @@ function renderSettings(view) {
     const file = e.target.files[0]; if (!file) return;
     try {
       const data = normalizeDb(JSON.parse(await file.text()));
-      if (!confirm(`Replace current data with ${data.games.length} games and ${data.stadiums.length} rinks from the file?`)) return;
+      if (!confirm(`Replace current data with ${data.days.length} game days, ${data.teams.length} teams and ${data.stadiums.length} rinks from the file?`)) return;
       db = data; saveDb(); toast('Data imported'); render();
     } catch (err) { alert('Import failed: ' + err.message); }
     finally { e.target.value = ''; }
@@ -438,7 +642,8 @@ function renderSettings(view) {
 }
 
 // ---------- boot ----------
+if (needsMigrationSave) saveDb(); // persist a v1 → v2 migration right away (never overwrite unreadable data)
 document.querySelectorAll('.tabbar button').forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
-$('#addBtn').onclick = () => setTab('game', 'new');
+$('#addBtn').onclick = () => setTab('day', 'new');
 render();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
