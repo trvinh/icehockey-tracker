@@ -12,7 +12,8 @@
 
 const STORAGE_KEY = 'hockeylog.v1';
 const SCHEMA_VERSION = 2;
-const GAME_TYPES = ['League', 'Tournament / Cup', 'Friendly'];
+const GAME_TYPES = ['League', 'Tournament / Cup'];
+const typeOf = (t) => (GAME_TYPES.includes(t) ? t : t === 'Friendly' ? 'Tournament / Cup' : 'League'); // 'Friendly' was removed: those were friendly cups
 const LOGO_PX = 96;
 
 // ---------- storage ----------
@@ -101,7 +102,7 @@ function normalizeDb(d) {
     })),
     teams,
     days: d.days.filter((x) => x && x.id && /^\d{4}-\d{2}-\d{2}$/.test(x.date)).map((x) => ({
-      id: String(x.id), date: x.date, type: GAME_TYPES.includes(x.type) ? x.type : 'League',
+      id: String(x.id), date: x.date, type: typeOf(x.type),
       competition: String(x.competition || ''), stadiumId: x.stadiumId ? String(x.stadiumId) : null,
       matches: (Array.isArray(x.matches) ? x.matches : []).map((m) => ({
         teamId: m && teamIds.has(String(m.teamId)) ? String(m.teamId) : null,
@@ -117,7 +118,19 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const today = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
-const fmtDate = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+/** German date format: ISO 'YYYY-MM-DD' -> 'DD.MM.YYYY'. */
+const deDate = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`;
+/** Parse 'DD.MM.YYYY' (also with / or -, 2-digit year, or no separators like 08112026) -> ISO, or null if invalid. */
+function parseDeDate(text) {
+  const t = text.trim();
+  const m = t.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/) || t.match(/^(\d{2})(\d{2})(\d{4})$/);
+  if (!m) return null;
+  const y = m[3].length === 2 ? 2000 + +m[3] : +m[3];
+  const iso = `${y}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+  const d = new Date(iso + 'T12:00:00');
+  return !isNaN(d) && d.toISOString().slice(0, 10) === iso ? iso : null;
+}
+const fmtDate = (iso) => `${new Date(iso + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'short' })}, ${deDate(iso)}`;
 const fmtKm = (km) => (km == null ? '–' : km.toLocaleString(undefined, { maximumFractionDigits: km < 100 ? 1 : 0 }) + ' km');
 const stadiumById = (id) => db.stadiums.find((s) => s.id === id);
 const teamById = (id) => db.teams.find((t) => t.id === id);
@@ -408,7 +421,7 @@ function renderDayForm(view) {
   const comps = [...new Set(db.days.map((x) => x.competition).filter(Boolean))].sort();
   view.innerHTML = `<form id="dayForm" autocomplete="off">
     <div class="row">
-      <div><label for="date">Date</label><input id="date" type="date" required value="${esc(d.date)}"></div>
+      <div><label for="date">Date</label><div class="inline date-field"><input id="date" inputmode="numeric" required placeholder="DD.MM.YYYY" value="${esc(deDate(d.date))}"><button type="button" id="datePick" aria-label="Pick date">📅</button><input id="datePicker" type="date" tabindex="-1" aria-hidden="true" value="${esc(d.date)}"></div></div>
       <div><label for="type">Type</label><select id="type">${GAME_TYPES.map((t) => `<option ${t === d.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
     </div>
     <label for="competition">League / tournament name</label>
@@ -450,6 +463,13 @@ function renderDayForm(view) {
   };
   updateTotal();
   $('#stadium').onchange = (e) => { $('#newRink').hidden = e.target.value !== '__new'; };
+  // Typed field shows DD.MM.YYYY; the hidden native picker offers a calendar.
+  $('#datePick').onclick = () => {
+    const iso = parseDeDate($('#date').value); if (iso) $('#datePicker').value = iso;
+    try { $('#datePicker').showPicker(); } catch { $('#datePicker').focus(); $('#datePicker').click(); }
+  };
+  $('#datePicker').onchange = (e) => { if (e.target.value) $('#date').value = deDate(e.target.value); };
+  $('#date').onblur = (e) => { const iso = parseDeDate(e.target.value); if (iso) e.target.value = deDate(iso); };
   $('#cancelBtn').onclick = () => setTab('games');
   if (!isNew) $('#delBtn').onclick = () => {
     if (!confirm('Delete this game day?')) return;
@@ -458,6 +478,8 @@ function renderDayForm(view) {
 
   form.onsubmit = (e) => {
     e.preventDefault();
+    const dateIso = parseDeDate($('#date').value);
+    if (!dateIso) { toast('Enter the date as DD.MM.YYYY'); $('#date').focus(); return; }
     const rows = [...form.querySelectorAll('.match-row')].map((r) => ({
       name: r.querySelector('.m-team').value.trim(), goals: count(r.querySelector('.m-goals').value), assists: count(r.querySelector('.m-assists').value),
     }));
@@ -470,7 +492,7 @@ function renderDayForm(view) {
       db.stadiums.push(newStadium); stadiumId = newStadium.id;
     }
     const data = {
-      date: $('#date').value, type: $('#type').value, competition: $('#competition').value.trim(), stadiumId,
+      date: dateIso, type: $('#type').value, competition: $('#competition').value.trim(), stadiumId,
       matches: rows.filter((r) => r.name).map((r) => ({ teamId: findOrCreateTeam(r.name).id, goals: r.goals, assists: r.assists })),
       notes: $('#notes').value.trim(),
     };
