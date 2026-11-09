@@ -361,7 +361,7 @@ function renderMap(el, rinkStats) {
       wrap.classList.toggle('fullscreen', on);
       document.body.classList.toggle('map-open', on);
       btn.textContent = on ? '✕' : '⛶'; btn.setAttribute('aria-label', on ? 'Close full-screen map' : 'Enlarge map');
-      setTimeout(() => { leafletMap.invalidateSize(); fit(); }, 50);
+      const m = leafletMap; setTimeout(() => { if (leafletMap === m) { m.invalidateSize(); fit(); } }, 50);
     };
     btn.onclick = () => setFull(!wrap.classList.contains('fullscreen'));
     document.addEventListener('keydown', function esc(e) {
@@ -385,8 +385,9 @@ function render() {
   const titles = { games: 'Game days', day: state.editing === 'new' ? 'New game day' : 'Edit game day', stats: 'Stats', teams: 'Teams', stadiums: 'Rinks', settings: 'Settings' };
   $('#title').textContent = titles[state.tab];
   $('#addBtn').hidden = state.tab !== 'games';
-  if (leafletMap && state.tab !== 'stats') { leafletMap.remove(); leafletMap = null; }
+  if (leafletMap) { leafletMap.remove(); leafletMap = null; }
   document.body.classList.remove('map-open');
+  $('#view').classList.toggle('wide', state.tab === 'stadiums');
   ({ games: renderDays, day: renderDayForm, stats: renderStats, teams: renderTeams, stadiums: renderStadiums, settings: renderSettings })[state.tab]($('#view'));
 }
 
@@ -566,12 +567,6 @@ function renderStats(view) {
   let html = filterControls() + '<div style="height:10px"></div><div class="kpis four">' +
     kpi(s.days, 'game days') + kpi(s.goals, 'goals') + kpi(s.assists, 'assists') + kpi(s.points, 'points') + '</div>';
 
-  html += `<h2>Driving</h2><div class="card">
-    <div class="kpis" style="margin:0">${kpi(fmtKm(s.km), db.settings.roundTrip ? 'round trips' : 'one way')}${kpi(s.trips, 'trips')}${kpi(s.trips - s.missing ? fmtKm(s.km / (s.trips - s.missing)) : '–', 'per trip')}</div>
-    ${s.missing ? `<p class="hint">${s.missing} trip(s) have no distance yet: check the Rinks tab.</p>` : ''}
-    <div class="map-wrap"><div id="map"></div><button type="button" class="map-full" aria-label="Enlarge map">⛶</button></div>
-  </div>`;
-
   if (s.byType.size > 1) {
     html += '<h2>By type</h2><div class="card"><table><tr><th>Type</th><th>Days</th><th>G</th><th>A</th></tr>' +
       [...s.byType].map(([t, b]) => `<tr><td>${esc(t)}</td><td>${b.days.size}</td><td>${b.goals}</td><td>${b.assists}</td></tr>`).join('') + '</table></div>';
@@ -581,12 +576,8 @@ function renderStats(view) {
     s.opponents.map((o) => { const t = teamById(o.teamId); return `<tr><td><span class="team-cell">${teamBadge(t, 28)}${esc(t ? t.name : '?')}</span></td><td>${o.games}</td><td>${o.goals}</td><td>${o.assists}</td></tr>`; }).join('') + '</table>' +
     '<p class="hint">Add team logos in the Teams tab.</p></div>';
 
-  html += '<h2>Rinks</h2><div class="card"><table><tr><th>Rink</th><th>Days</th><th>Distance</th></tr>' +
-    s.rinks.map((r) => { const st = stadiumById(r.id); return `<tr><td>${esc(st ? st.name : '?')}</td><td>${r.days.size}</td><td>${fmtKm(st?.distanceKm)}</td></tr>`; }).join('') + '</table></div>';
-
   view.innerHTML = html;
   bindFilters();
-  renderMap($('#map'), s.rinks);
 }
 
 function renderTeams(view) {
@@ -658,12 +649,20 @@ function renderStadiums(view) {
   const used = new Map();
   for (const d of db.days) if (d.stadiumId) used.set(d.stadiumId, (used.get(d.stadiumId) || 0) + 1);
   const list = [...db.stadiums].sort((a, b) => a.name.localeCompare(b.name));
-  let html = '<p class="hint">Distances are one way from home. Tap a rink to edit, set the distance by hand, or look it up again (needed for the map).</p>';
+  const st = computeStats(filteredDays());
+  const kpi = (v, l) => `<div class="kpi"><b>${v}</b><small>${l}</small></div>`;
+  let html = '<div class="split"><section>';
+  html += db.days.length ? `<h2>Driving</h2>${filterControls()}<div class="card" style="margin-top:8px">
+    <div class="kpis" style="margin:0">${kpi(fmtKm(st.km), db.settings.roundTrip ? 'round trips' : 'one way')}${kpi(st.trips, 'trips')}${kpi(st.trips - st.missing ? fmtKm(st.km / (st.trips - st.missing)) : '–', 'per trip')}</div>
+    ${st.missing ? `<p class="hint">${st.missing} trip(s) have no distance yet: set it on the rink.</p>` : ''}
+    <div class="map-wrap"><div id="map"></div><button type="button" class="map-full" aria-label="Enlarge map">⛶</button></div>
+  </div>` : '<h2>Driving</h2><div class="empty">Driving stats appear once you have added game days.</div>';
+  html += '</section><section><h2>Rinks</h2><p class="hint">Distances are one way from home. Tap a rink to edit, set the distance by hand, or look it up again (needed for the map).</p>';
   if (!list.length) html += '<div class="empty">Rinks are added when you enter a game day.</div>';
   for (const s of list) {
     const open = state.editing === s.id;
     html += `<div class="card"><div class="game" data-id="${esc(s.id)}"><div class="main"><div class="opp">${esc(s.name)}</div><div class="meta">${esc(s.address || 'no address')}${s.lat == null ? ' · not on map' : ''}</div></div>
-      <div class="right"><div class="score">${fmtKm(s.distanceKm)}</div><div class="pts">${s.durationMin ? s.durationMin + ' min · ' : ''}${used.get(s.id) || 0} days</div></div></div>
+      <div class="right"><div class="score">${fmtKm(s.distanceKm)}</div><div class="pts">${s.durationMin ? s.durationMin + ' min · ' : ''}${used.get(s.id) || 0} ${(used.get(s.id) || 0) === 1 ? "visit" : "visits"}</div></div></div>
       ${open ? `<form class="rinkForm" data-id="${esc(s.id)}">
         <label>Name</label><input name="name" required value="${esc(s.name)}">
         <label>Address</label><input name="address" value="${esc(s.address)}">
@@ -673,7 +672,8 @@ function renderStadiums(view) {
         ${used.get(s.id) ? '' : '<button class="btn danger" type="button" data-del>Delete rink</button>'}
       </form>` : ''}</div>`;
   }
-  view.innerHTML = html;
+  view.innerHTML = html + '</section></div>';
+  if (db.days.length) { bindFilters(); renderMap($('#map'), st.rinks); }
   view.querySelectorAll('.game').forEach((el) => (el.onclick = () => { state.editing = state.editing === el.dataset.id ? null : el.dataset.id; render(); }));
   const form = view.querySelector('.rinkForm');
   if (!form) return;

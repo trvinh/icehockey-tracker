@@ -168,3 +168,12 @@ body.map-open .tabbar, body.map-open .topbar { visibility: hidden; }
 .team-tile .tstats { display: flex; gap: 10px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .team-tile .tstats b { display: block; font-size: 17px; color: var(--text); }
 .team-edit { grid-column: 1 / -1; }
+
+/* Rinks tab: Driving + rink list side by side on wide screens */
+main.wide { max-width: 1200px; }
+.split { display: grid; gap: 0 20px; }
+.split > section { min-width: 0; }
+@media (min-width: 700px) {
+  .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+  .split #map { height: 420px; }
+}
