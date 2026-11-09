@@ -46,10 +46,11 @@ log = logging.getLogger("hockeylog")
 
 
 class FailureLimiter:
-    """Global brake on wrong passwords: after `limit` failures within `window` s, refuse for `window` s.
+    """Slows down wrong passwords: after `limit` failures within `window` s, each further failure waits.
 
-    Global rather than per-IP because behind Tailscale Funnel all requests arrive from localhost.
-    The token is long and random, so this mainly keeps logs and CPU quiet under scanning.
+    It never blocks the correct password (a hard lockout let one device with an empty or wrong
+    password lock out every device). The token is long and random, so guessing is not feasible
+    anyway; this keeps scanners slow and the logs quiet.
     """
 
     def __init__(self, limit: int = 20, window: float = 60.0):
@@ -60,10 +61,10 @@ class FailureLimiter:
     def _prune(self, now: float) -> None:
         self._times = [t for t in self._times if now - t < self.window]
 
-    def allow(self) -> bool:
+    def penalty(self) -> float:
         with self._lock:
             self._prune(time.monotonic())
-            return len(self._times) < self.limit
+            return 1.0 if len(self._times) >= self.limit else 0.0
 
     def record(self) -> None:
         with self._lock:
@@ -219,13 +220,12 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         if not self.token:
             return True
-        if not FAILS.allow():
-            return False
-        got = self.headers.get("Authorization", "")
+        got = self.headers.get("Authorization", "").strip()
         ok = hmac.compare_digest(got.encode(), f"Bearer {self.token}".encode())
         if not ok:
             FAILS.record()
-            log.warning("rejected request with wrong token")
+            log.warning("rejected request: %s password", "missing" if not got else "wrong")
+            time.sleep(FAILS.penalty())
         return ok
 
     def _read_json(self):
@@ -307,7 +307,7 @@ def make_server(db_path: str, web_dir: str, host: str, port: int, token: str | N
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     default_web = Path(__file__).resolve().parent.parent
-    token = os.environ.get("HOCKEY_TOKEN", "")
+    token = os.environ.get("HOCKEY_TOKEN", "").strip().strip('"').strip("'")
     if len(token) < 20 and os.environ.get("HOCKEY_ALLOW_NO_AUTH") != "1":
         sys.exit("HOCKEY_TOKEN must be set to a random string of at least 20 characters "
                  "(e.g. `python3 -c 'import secrets; print(secrets.token_urlsafe(24))'`).")
@@ -316,7 +316,7 @@ def main() -> None:
         web_dir=os.environ.get("HOCKEY_WEB_DIR", str(default_web)),
         host=os.environ.get("HOCKEY_HOST", "0.0.0.0"),
         port=int(os.environ.get("HOCKEY_PORT", "8090")),
-        token=token or None,
+        token=token.strip().strip('"').strip("'") or None,
         maps_key=os.environ.get("GOOGLE_MAPS_KEY"),
     )
     log.info("Hockey Log listening on %s:%s (routes=%s, auth=%s)", *srv.server_address[:2],

@@ -637,7 +637,8 @@ function renderSettings(view) {
     <button class="btn secondary" type="button" id="recalc">Recalculate all rink distances</button>
   </form>
   ${sync.enabled ? `<h2>Sync</h2><div class="card"><p class="hint" id="syncInfo">${esc(syncStatusText())}</p>
-    ${sync.auth ? `<label for="token">Sync password</label><input id="token" type="password" value="${esc(st.syncToken)}" autocomplete="current-password">` : ''}
+    ${sync.auth ? `<label for="token">Sync password</label><input id="token" type="text" value="${esc(st.syncToken)}" autocapitalize="off" autocorrect="off" spellcheck="false" class="mono">
+    <p class="hint">Paste it rather than typing: it is case-sensitive and long.</p>` : ''}
     <button class="btn secondary" type="button" id="syncNow">Sync now</button></div>` : ''}
   <h2>Backup</h2>
   <p class="hint">${sync.enabled ? 'Data is stored on this device and synced to your home server.' : 'Data is stored only in this browser. Export regularly (e.g. to iCloud Drive) to keep a backup.'}</p>
@@ -651,12 +652,14 @@ function renderSettings(view) {
     const home = $('#home').value.trim();
     const homeChanged = home !== st.homeAddress;
     Object.assign(st, { playerName: $('#playerName').value.trim(), homeAddress: home, mapsKey: $('#key').value.trim(), roundTrip: $('#roundTrip').checked });
-    if ($('#token')) st.syncToken = $('#token').value;
+    if ($('#token')) st.syncToken = $('#token').value.trim();
     if (homeChanged) Object.assign(st, { homeLat: null, homeLng: null });
     saveDb();
     toast(homeChanged && db.stadiums.some((s) => s.distanceSource === 'google') ? 'Saved. Home changed: recalculate distances.' : 'Settings saved');
   };
-  if ($('#syncNow')) $('#syncNow').onclick = async () => { await doSync(); toast(sync.lastError ? 'Sync failed: ' + sync.lastError : 'Synced'); render(); };
+  const saveToken = () => { const t = $('#token'); if (t && t.value.trim() !== st.syncToken) { st.syncToken = t.value.trim(); saveDb({ sync: false }); } };
+  if ($('#token')) $('#token').onchange = saveToken;
+  if ($('#syncNow')) $('#syncNow').onclick = async () => { saveToken(); await doSync(); toast(sync.lastError ? 'Sync failed: ' + sync.lastError : 'Synced'); render(); };
   $('#recalc').onclick = async (e) => {
     const targets = db.stadiums.filter((s) => s.address && s.distanceSource !== 'manual');
     if (!targets.length) { toast('No rinks with an address to look up'); return; }
@@ -745,6 +748,7 @@ function applyRemote(rec) {
 async function doSync() {
   if (!sync.enabled) return;
   if (sync.running) { sync.again = true; return; }
+  if (sync.auth && !db.settings.syncToken) { sync.lastError = 'enter the sync password in Settings'; updateSyncDot(); return; }
   sync.running = true;
   const st = db.syncState;
   try {
@@ -821,6 +825,17 @@ async function initSync() {
 window.addEventListener('online', () => (sync.enabled ? doSync() : initSync()));
 
 // ---------- boot ----------
+// One-time setup link: https://…/#token=<password> stores the sync password, then removes it from the address bar.
+function takeTokenFromHash() {
+  if (!location.hash.startsWith('#token=')) return;
+  db.settings.syncToken = decodeURIComponent(location.hash.slice(7)).trim();
+  saveDb({ sync: false });
+  history.replaceState(null, '', location.pathname + location.search);
+  setTimeout(() => toast('Sync password saved'), 300);
+  if (sync.enabled) doSync();
+}
+takeTokenFromHash();
+window.addEventListener('hashchange', takeTokenFromHash);
 if (needsMigrationSave) saveDb(); // persist a v1 → v2 migration right away (never overwrite unreadable data)
 document.querySelectorAll('.tabbar button').forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
 $('#addBtn').onclick = () => setTab('day', 'new');
