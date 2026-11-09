@@ -841,4 +841,14 @@ document.querySelectorAll('.tabbar button').forEach((b) => (b.onclick = () => se
 $('#addBtn').onclick = () => setTab('day', 'new');
 render();
 initSync();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
+if ('serviceWorker' in navigator) {
+  // Apply app updates right away: when a new service worker takes over, reload once (not on first install).
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded && state.tab !== 'day') { reloaded = true; location.reload(); }
+  });
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  }).catch((e) => console.warn('SW registration failed', e));
+}
