@@ -108,6 +108,9 @@ function normalizeDb(d) {
         teamId: m && teamIds.has(String(m.teamId)) ? String(m.teamId) : null,
         goals: count(m && m.goals), assists: count(m && m.assists),
       })),
+      // Tournaments can span several days; league games are always one day.
+      dayCount: typeOf(x.type) === 'League' ? 1 : Math.min(14, Math.max(1, Math.floor(num(x.dayCount) || 1))),
+      overnight: !!x.overnight,
       notes: String(x.notes || ''), createdAt: x.createdAt || new Date().toISOString(),
     })),
   };
@@ -129,6 +132,12 @@ function parseDeDate(text) {
   const iso = `${y}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
   const d = new Date(iso + 'T12:00:00');
   return !isNaN(d) && d.toISOString().slice(0, 10) === iso ? iso : null;
+}
+/** All calendar dates an entry covers (a 3-day tournament covers its start date and the next 2). */
+function entryDates(d) {
+  const out = [], base = new Date(d.date + 'T12:00:00');
+  for (let i = 0; i < (d.dayCount || 1); i++) { const x = new Date(base); x.setDate(base.getDate() + i); out.push(x.toISOString().slice(0, 10)); }
+  return out;
 }
 const fmtDate = (iso) => `${new Date(iso + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'short' })}, ${deDate(iso)}`;
 const fmtKm = (km) => (km == null ? '–' : km.toLocaleString(undefined, { maximumFractionDigits: km < 100 ? 1 : 0 }) + ' km');
@@ -231,27 +240,28 @@ async function updateStadiumDistance(stadium, { quiet = false } = {}) {
 
 // ---------- stats ----------
 function computeStats(days) {
-  const dates = new Set(days.map((d) => d.date));
+  const dates = new Set();
   let goals = 0, assists = 0;
   const opp = new Map(), rinks = new Map(), byType = new Map();
   const trips = new Set();
   for (const d of days) {
-    const t = dayTotals(d);
+    const t = dayTotals(d), ds = entryDates(d);
+    ds.forEach((x) => dates.add(x));
     goals += t.goals; assists += t.assists;
     const b = byType.get(d.type) || { days: new Set(), goals: 0, assists: 0 };
-    b.days.add(d.date); b.goals += t.goals; b.assists += t.assists; byType.set(d.type, b);
+    ds.forEach((x) => b.days.add(x)); b.goals += t.goals; b.assists += t.assists; byType.set(d.type, b);
     for (const m of d.matches) {
       if (!m.teamId) continue;
-      const o = opp.get(m.teamId) || { teamId: m.teamId, days: new Set(), goals: 0, assists: 0 };
-      o.days.add(d.date); o.goals += m.goals; o.assists += m.assists; opp.set(m.teamId, o);
+      const o = opp.get(m.teamId) || { teamId: m.teamId, games: 0, goals: 0, assists: 0 };
+      o.games++; o.goals += m.goals; o.assists += m.assists; opp.set(m.teamId, o);
     }
     if (d.stadiumId) {
-      trips.add(`${d.date}|${d.stadiumId}`);
+      // One trip per day at a rink, or one trip for the whole tournament when staying overnight.
+      for (const x of d.overnight ? [d.date] : ds) trips.add(`${x}|${d.stadiumId}`);
       const r = rinks.get(d.stadiumId) || { id: d.stadiumId, days: new Set() };
-      r.days.add(d.date); rinks.set(d.stadiumId, r);
+      ds.forEach((x) => r.days.add(x)); rinks.set(d.stadiumId, r);
     }
   }
-  // One trip = one game day at one rink.
   const factor = db.settings.roundTrip ? 2 : 1;
   let km = 0, missing = 0;
   for (const key of trips) {
@@ -260,7 +270,7 @@ function computeStats(days) {
   }
   return {
     days: dates.size, goals, assists, points: goals + assists,
-    opponents: [...opp.values()].sort((a, b) => (b.goals + b.assists) - (a.goals + a.assists) || b.days.size - a.days.size),
+    opponents: [...opp.values()].sort((a, b) => (b.goals + b.assists) - (a.goals + a.assists) || b.games - a.games),
     rinks: [...rinks.values()].sort((a, b) => b.days.size - a.days.size),
     trips: trips.size, km, missing, byType,
   };
@@ -320,7 +330,8 @@ function renderMap(el, rinkStats) {
     const size = 26 + Math.round(14 * (r.days.size / maxDays));
     L.marker([s.lat, s.lng], { icon: L.divIcon({ className: 'pin rink-pin', html: `<span>${r.days.size}</span>`, iconSize: [size, size] }) })
       .addTo(leafletMap)
-      .bindPopup(`<b>${esc(s.name)}</b><br>${r.days.size} game day${r.days.size > 1 ? 's' : ''} · ${fmtKm(s.distanceKm)}`);
+      .bindPopup(`<b>${esc(s.name)}</b><br>${r.days.size} game day${r.days.size > 1 ? 's' : ''} · ${fmtKm(s.distanceKm)}`)
+      .bindTooltip(esc(s.name), { permanent: true, direction: 'right', offset: [size / 2, 0], className: 'rink-name' });
     bounds.push([s.lat, s.lng]);
     if (!home) continue;
     const pts = curvePoints(home, s);
@@ -334,8 +345,30 @@ function renderMap(el, rinkStats) {
       L.marker(pts[Math.floor(pts.length / 2)], { interactive: false, icon: L.divIcon({ className: 'km-label', html: `<span>${esc(fmtKm(s.distanceKm))}</span>`, iconSize: null }) }).addTo(leafletMap);
     }
   }
-  if (bounds.length === 1) leafletMap.setView(bounds[0], 12);
-  else leafletMap.fitBounds(bounds, { padding: [36, 36] });
+  const fit = () => (bounds.length === 1 ? leafletMap.setView(bounds[0], 12) : leafletMap.fitBounds(bounds, { padding: [36, 36] }));
+  // Pins shrink when zoomed out (so close rinks stay apart) and names appear when zoomed in.
+  const zoomClass = () => {
+    const z = leafletMap.getZoom(), c = leafletMap.getContainer().classList;
+    c.toggle('z-far', z <= 8); c.toggle('z-mid', z > 8 && z <= 10); c.toggle('z-near', z >= 11);
+  };
+  leafletMap.on('zoomend', zoomClass);
+  fit(); zoomClass();
+
+  // Enlarge: the map fills the screen; tap ✕ (or Esc) to go back.
+  const wrap = el.closest('.map-wrap'), btn = wrap && wrap.querySelector('.map-full');
+  if (btn) {
+    const setFull = (on) => {
+      wrap.classList.toggle('fullscreen', on);
+      document.body.classList.toggle('map-open', on);
+      btn.textContent = on ? '✕' : '⛶'; btn.setAttribute('aria-label', on ? 'Close full-screen map' : 'Enlarge map');
+      setTimeout(() => { leafletMap.invalidateSize(); fit(); }, 50);
+    };
+    btn.onclick = () => setFull(!wrap.classList.contains('fullscreen'));
+    document.addEventListener('keydown', function esc(e) {
+      if (!leafletMap || !document.body.contains(wrap)) { document.removeEventListener('keydown', esc); return; }
+      if (e.key === 'Escape' && wrap.classList.contains('fullscreen')) setFull(false);
+    });
+  }
 }
 
 // ---------- views ----------
@@ -353,6 +386,7 @@ function render() {
   $('#title').textContent = titles[state.tab];
   $('#addBtn').hidden = state.tab !== 'games';
   if (leafletMap && state.tab !== 'stats') { leafletMap.remove(); leafletMap = null; }
+  document.body.classList.remove('map-open');
   ({ games: renderDays, day: renderDayForm, stats: renderStats, teams: renderTeams, stadiums: renderStadiums, settings: renderSettings })[state.tab]($('#view'));
 }
 
@@ -381,7 +415,9 @@ function renderDays(view) {
   for (const d of days) {
     const s = stadiumById(d.stadiumId), t = dayTotals(d);
     const teams = d.matches.map((m) => teamById(m.teamId)).filter(Boolean);
-    html += `<div class="day-head">${esc(fmtDate(d.date))}</div>
+    const n = d.dayCount || 1;
+    const head = n > 1 ? `${fmtDate(d.date)} – ${fmtDate(entryDates(d)[n - 1])} · ${n} days` : fmtDate(d.date);
+    html += `<div class="day-head">${esc(head)}</div>
     <div class="card game" data-id="${esc(d.id)}">
       <div class="main">
         <div class="meta"><span class="badge">${esc(d.type)}</span>${esc(d.competition)}${d.competition && s ? ' · ' : ''}${esc(s ? s.name : '')}</div>
@@ -414,7 +450,7 @@ function renderDayForm(view) {
   const isNew = state.editing === 'new';
   const last = [...db.days].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const d = isNew
-    ? { date: today(), type: last?.type || 'League', competition: '', stadiumId: '', matches: [{ teamId: null, goals: 0, assists: 0 }], notes: '' }
+    ? { date: today(), type: last?.type || 'League', competition: '', stadiumId: '', matches: [{ teamId: null, goals: 0, assists: 0 }], dayCount: 1, overnight: false, notes: '' }
     : db.days.find((x) => x.id === state.editing);
   if (!d) return setTab('games');
   const stadiums = [...db.stadiums].sort((a, b) => a.name.localeCompare(b.name));
@@ -423,6 +459,10 @@ function renderDayForm(view) {
     <div class="row">
       <div><label for="date">Date</label><div class="inline date-field"><input id="date" inputmode="numeric" required placeholder="DD.MM.YYYY" value="${esc(deDate(d.date))}"><button type="button" id="datePick" aria-label="Pick date">📅</button><input id="datePicker" type="date" tabindex="-1" aria-hidden="true" value="${esc(d.date)}"></div></div>
       <div><label for="type">Type</label><select id="type">${GAME_TYPES.map((t) => `<option ${t === d.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+    </div>
+    <div id="multiDay" class="row" ${d.type === 'League' ? 'hidden' : ''}>
+      <div><label for="dayCount">Number of days</label>${stepper('dayCountIn', d.dayCount || 1).replace('class="dayCountIn"', 'class="dayCountIn" id="dayCount" min="1" max="14"')}</div>
+      <div><label class="inline overnight" id="overnightWrap" ${(d.dayCount || 1) > 1 ? '' : 'hidden'}><input id="overnight" type="checkbox" ${d.overnight ? 'checked' : ''}> Stayed overnight (one trip)</label></div>
     </div>
     <label for="competition">League / tournament name</label>
     <input id="competition" list="compList" value="${esc(d.competition)}" placeholder="e.g. U11 Regional League">
@@ -452,7 +492,12 @@ function renderDayForm(view) {
   };
   form.addEventListener('click', (e) => {
     const step = e.target.closest('[data-d]');
-    if (step) { const inp = step.parentElement.querySelector('input'); inp.value = Math.max(0, count(inp.value) + +step.dataset.d); updateTotal(); }
+    if (step) {
+      const inp = step.parentElement.querySelector('input');
+      inp.value = Math.max(inp.id === 'dayCount' ? 1 : 0, count(inp.value) + +step.dataset.d);
+      if (inp.id === 'dayCount') inp.value = Math.min(14, +inp.value);
+      updateTotal(); syncMultiDay();
+    }
     const rm = e.target.closest('.remove');
     if (rm) { rm.closest('.match-row').remove(); updateTotal(); }
   });
@@ -463,6 +508,13 @@ function renderDayForm(view) {
   };
   updateTotal();
   $('#stadium').onchange = (e) => { $('#newRink').hidden = e.target.value !== '__new'; };
+  // Number of days only applies to tournaments; "stayed overnight" only to multi-day ones.
+  function syncMultiDay() {
+    $('#multiDay').hidden = $('#type').value === 'League';
+    $('#overnightWrap').hidden = count($('#dayCount').value) < 2;
+  }
+  $('#type').addEventListener('change', syncMultiDay);
+  $('#dayCount').addEventListener('input', syncMultiDay);
   // Typed field shows DD.MM.YYYY; the hidden native picker offers a calendar.
   $('#datePick').onclick = () => {
     const iso = parseDeDate($('#date').value); if (iso) $('#datePicker').value = iso;
@@ -493,6 +545,8 @@ function renderDayForm(view) {
     }
     const data = {
       date: dateIso, type: $('#type').value, competition: $('#competition').value.trim(), stadiumId,
+      dayCount: $('#type').value === 'League' ? 1 : Math.min(14, Math.max(1, count($('#dayCount').value))),
+      overnight: $('#type').value !== 'League' && count($('#dayCount').value) > 1 && $('#overnight').checked,
       matches: rows.filter((r) => r.name).map((r) => ({ teamId: findOrCreateTeam(r.name).id, goals: r.goals, assists: r.assists })),
       notes: $('#notes').value.trim(),
     };
@@ -515,7 +569,7 @@ function renderStats(view) {
   html += `<h2>Driving</h2><div class="card">
     <div class="kpis" style="margin:0">${kpi(fmtKm(s.km), db.settings.roundTrip ? 'round trips' : 'one way')}${kpi(s.trips, 'trips')}${kpi(s.trips - s.missing ? fmtKm(s.km / (s.trips - s.missing)) : '–', 'per trip')}</div>
     ${s.missing ? `<p class="hint">${s.missing} trip(s) have no distance yet: check the Rinks tab.</p>` : ''}
-    <div id="map"></div>
+    <div class="map-wrap"><div id="map"></div><button type="button" class="map-full" aria-label="Enlarge map">⛶</button></div>
   </div>`;
 
   if (s.byType.size > 1) {
@@ -523,8 +577,8 @@ function renderStats(view) {
       [...s.byType].map(([t, b]) => `<tr><td>${esc(t)}</td><td>${b.days.size}</td><td>${b.goals}</td><td>${b.assists}</td></tr>`).join('') + '</table></div>';
   }
 
-  html += '<h2>Opponents</h2><div class="card"><table><tr><th>Team</th><th>Days</th><th>G</th><th>A</th></tr>' +
-    s.opponents.map((o) => { const t = teamById(o.teamId); return `<tr><td><span class="team-cell">${teamBadge(t, 28)}${esc(t ? t.name : '?')}</span></td><td>${o.days.size}</td><td>${o.goals}</td><td>${o.assists}</td></tr>`; }).join('') + '</table>' +
+  html += '<h2>Opponents</h2><div class="card"><table><tr><th>Team</th><th>Games</th><th>G</th><th>A</th></tr>' +
+    s.opponents.map((o) => { const t = teamById(o.teamId); return `<tr><td><span class="team-cell">${teamBadge(t, 28)}${esc(t ? t.name : '?')}</span></td><td>${o.games}</td><td>${o.goals}</td><td>${o.assists}</td></tr>`; }).join('') + '</table>' +
     '<p class="hint">Add team logos in the Teams tab.</p></div>';
 
   html += '<h2>Rinks</h2><div class="card"><table><tr><th>Rink</th><th>Days</th><th>Distance</th></tr>' +
@@ -536,25 +590,44 @@ function renderStats(view) {
 }
 
 function renderTeams(view) {
-  const used = new Map();
-  for (const d of db.days) for (const m of d.matches) if (m.teamId) { if (!used.has(m.teamId)) used.set(m.teamId, new Set()); used.get(m.teamId).add(d.date); }
+  // Per team: games = times he played against them (one per opponent row), with his goals and assists.
+  const stats = new Map();
+  for (const d of db.days) for (const m of d.matches) {
+    if (!m.teamId) continue;
+    const x = stats.get(m.teamId) || { games: 0, goals: 0, assists: 0 };
+    x.games++; x.goals += m.goals; x.assists += m.assists; stats.set(m.teamId, x);
+  }
   const list = [...db.teams].sort((a, b) => a.name.localeCompare(b.name));
   let html = '<p class="hint">Tap a team to add its logo (a screenshot or photo works) or fix its name. Renaming a team to an existing name merges the two.</p>';
   if (!list.length) html += '<div class="empty">Teams are added when you enter a game day.</div>';
+  html += '<div class="team-grid">';
   for (const t of list) {
-    const open = state.editing === t.id;
-    html += `<div class="card"><div class="game" data-id="${esc(t.id)}"><div class="main team-cell">${teamBadge(t, 40)}<b>${esc(t.name)}</b></div>
-      <div class="right"><div class="pts">${used.get(t.id)?.size || 0} days</div></div></div>
-      ${open ? `<form class="teamForm" data-id="${esc(t.id)}">
+    const open = state.editing === t.id, x = stats.get(t.id) || { games: 0, goals: 0, assists: 0 };
+    html += `<div class="team-tile${open ? ' open' : ''}" data-id="${esc(t.id)}" role="button" tabindex="0">
+      ${teamBadge(t, 64)}
+      <div class="tname">${esc(t.name)}</div>
+      <div class="tstats"><span><b>${x.games}</b>games</span><span><b>${x.goals}</b>goals</span><span><b>${x.assists}</b>assists</span></div>
+    </div>`;
+    if (open) {
+      html += `<form class="teamForm card team-edit" data-id="${esc(t.id)}">
         <label>Name</label><input name="name" required value="${esc(t.name)}">
         <label>Logo</label><input name="logo" type="file" accept="image/*">
         <button class="btn" type="submit">Save</button>
         ${t.logo ? '<button class="btn secondary" type="button" data-nologo>Remove logo</button>' : ''}
-        ${used.has(t.id) ? '' : '<button class="btn danger" type="button" data-del>Delete team</button>'}
-      </form>` : ''}</div>`;
+        ${stats.has(t.id) ? '' : '<button class="btn danger" type="button" data-del>Delete team</button>'}
+        <button class="btn secondary" type="button" data-close>Close</button>
+      </form>`;
+    }
   }
+  html += '</div>';
   view.innerHTML = html;
-  view.querySelectorAll('.game').forEach((el) => (el.onclick = () => { state.editing = state.editing === el.dataset.id ? null : el.dataset.id; render(); }));
+  const toggle = (id) => { state.editing = state.editing === id ? null : id; render(); };
+  view.querySelectorAll('.team-tile').forEach((el) => {
+    el.onclick = () => toggle(el.dataset.id);
+    el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(el.dataset.id); } };
+  });
+  const closeBtn = view.querySelector('[data-close]');
+  if (closeBtn) closeBtn.onclick = () => toggle(state.editing);
   const form = view.querySelector('.teamForm');
   if (!form) return;
   const t = teamById(form.dataset.id);
