@@ -274,9 +274,22 @@ function renderMap(el, rinkStats) {
     return;
   }
   leafletMap = L.map(el, { zoomControl: true, attributionControl: true, scrollWheelZoom: false });
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 18, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  }).addTo(leafletMap);
+  const layers = {
+    Standard: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }),
+    Light: L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19, subdomains: 'abcd', attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    }),
+    Satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19, attribution: 'Imagery &copy; Esri',
+    }),
+  };
+  let chosen = 'Standard';
+  try { if (layers[localStorage.getItem('hockeylog.mapLayer')]) chosen = localStorage.getItem('hockeylog.mapLayer'); } catch { /* per-device preference only */ }
+  layers[chosen].addTo(leafletMap);
+  L.control.layers(layers, null, { position: 'topright' }).addTo(leafletMap);
+  leafletMap.on('baselayerchange', (e) => { try { localStorage.setItem('hockeylog.mapLayer', e.name); } catch { /* ignore */ } });
   const bounds = [];
   const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#0b3d91';
   if (home) {
