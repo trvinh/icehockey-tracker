@@ -637,8 +637,8 @@ function renderSettings(view) {
     <button class="btn secondary" type="button" id="recalc">Recalculate all rink distances</button>
   </form>
   ${sync.enabled ? `<h2>Sync</h2><div class="card"><p class="hint" id="syncInfo">${esc(syncStatusText())}</p>
-    ${sync.auth ? `<label for="token">Sync password</label><input id="token" type="text" value="${esc(st.syncToken)}" autocapitalize="off" autocorrect="off" spellcheck="false" class="mono">
-    <p class="hint">Paste it rather than typing: it is case-sensitive and long.</p>` : ''}
+    ${sync.auth ? `<label for="token">Sync password</label><input id="token" type="text" value="" placeholder="${st.syncToken && !sync.lastError ? '✓ saved – paste a new one to replace' : 'paste the sync password'}" autocapitalize="off" autocorrect="off" spellcheck="false" class="mono">
+    <p class="hint">The password stays hidden once saved. Forgot it? Send <b>hockey sync key</b> to your Telegram bot.</p>` : ''}
     <button class="btn secondary" type="button" id="syncNow">Sync now</button></div>` : ''}
   <h2>Backup</h2>
   <p class="hint">${sync.enabled ? 'Data is stored on this device and synced to your home server.' : 'Data is stored only in this browser. Export regularly (e.g. to iCloud Drive) to keep a backup.'}</p>
@@ -652,12 +652,13 @@ function renderSettings(view) {
     const home = $('#home').value.trim();
     const homeChanged = home !== st.homeAddress;
     Object.assign(st, { playerName: $('#playerName').value.trim(), homeAddress: home, mapsKey: $('#key').value.trim(), roundTrip: $('#roundTrip').checked });
-    if ($('#token')) st.syncToken = $('#token').value.trim();
+    if ($('#token') && $('#token').value.trim()) st.syncToken = $('#token').value.trim();
     if (homeChanged) Object.assign(st, { homeLat: null, homeLng: null });
     saveDb();
     toast(homeChanged && db.stadiums.some((s) => s.distanceSource === 'google') ? 'Saved. Home changed: recalculate distances.' : 'Settings saved');
   };
-  const saveToken = () => { const t = $('#token'); if (t && t.value.trim() !== st.syncToken) { st.syncToken = t.value.trim(); saveDb({ sync: false }); } };
+  // An empty field means "keep the saved password"; only a pasted value replaces it.
+  const saveToken = () => { const t = $('#token'); if (t && t.value.trim() && t.value.trim() !== st.syncToken) { st.syncToken = t.value.trim(); saveDb({ sync: false }); } };
   if ($('#token')) $('#token').onchange = saveToken;
   if ($('#syncNow')) $('#syncNow').onclick = async () => { saveToken(); await doSync(); toast(sync.lastError ? 'Sync failed: ' + sync.lastError : 'Synced'); render(); };
   $('#recalc').onclick = async (e) => {
@@ -673,7 +674,9 @@ function renderSettings(view) {
     render();
   };
   $('#exportBtn').onclick = () => {
-    const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+    const { syncState, ...rest } = db; // eslint-disable-line no-unused-vars
+    const { syncToken, ...settings } = db.settings; // eslint-disable-line no-unused-vars
+    const blob = new Blob([JSON.stringify({ ...rest, settings }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = `hockey-log-${today()}.json`;
     document.body.appendChild(a); a.click(); a.remove();
@@ -686,6 +689,8 @@ function renderSettings(view) {
       const data = normalizeDb(JSON.parse(await file.text()));
       if (!confirm(`Replace current data with ${data.days.length} game days, ${data.teams.length} teams and ${data.stadiums.length} rinks from the file?`)) return;
       data.syncState = { seq: 0, hashes: {} }; // everything counts as new and is pushed to the server
+      data.settings.syncToken = db.settings.syncToken; // the password belongs to this device, not to the file
+      if (!data.settings.mapsKey) data.settings.mapsKey = db.settings.mapsKey;
       db = data; saveDb(); toast('Data imported'); render();
     } catch (err) { alert('Import failed: ' + err.message); }
     finally { e.target.value = ''; }
@@ -745,45 +750,62 @@ function applyRemote(rec) {
   else db[key].push(rec.data);
 }
 
+/** First sync of a device: take the server's shared settings, but keep local values where the server has none. */
+function mergeSettings(remote) {
+  for (const [key, value] of Object.entries(remote || {})) {
+    if (value !== '' && value !== null && value !== undefined) db.settings[key] = value;
+  }
+}
+
 async function doSync() {
   if (!sync.enabled) return;
   if (sync.running) { sync.again = true; return; }
   if (sync.auth && !db.settings.syncToken) { sync.lastError = 'enter the sync password in Settings'; updateSyncDot(); return; }
   sync.running = true;
-  const st = db.syncState;
   try {
-    // 1. push local changes since the last sync
+    // 1. Pull first, so a device that has never synced cannot overwrite the server with its empty data.
+    const res = await api('api/changes?since=' + db.syncState.seq);
+    const applied = [];
+    let settingsMergedFrom = null;
+    for (const rec of res.records) {
+      const k = rec.kind + ':' + rec.id;
+      const synced = db.syncState.hashes[k];
+      const localHash = recHash(localRecords().get(k));
+      const remoteHash = rec.deleted ? null : hashStr(JSON.stringify(rec.data));
+      if (localHash === remoteHash) { // already identical (e.g. the echo of our own push)
+        if (remoteHash) db.syncState.hashes[k] = remoteHash; else delete db.syncState.hashes[k];
+        continue;
+      }
+      if (synced !== undefined && localHash !== synced) continue; // edited here since last sync: our version is pushed below
+      if (k === 'settings:main' && synced === undefined && !rec.deleted) { mergeSettings(rec.data); settingsMergedFrom = remoteHash; continue; }
+      applyRemote(rec); applied.push(k);
+    }
+    if (applied.length || settingsMergedFrom) {
+      db = normalizeDb(db);
+      const after = localRecords();
+      for (const k of applied) { const r = after.get(k); if (r) db.syncState.hashes[k] = recHash(r); else delete db.syncState.hashes[k]; }
+      // Remember the server's version, so merged-in local values (if any) are pushed next.
+      if (settingsMergedFrom) db.syncState.hashes['settings:main'] = settingsMergedFrom;
+    }
+    db.syncState.seq = res.seq;
+
+    // 2. Push everything that differs from what the server last had.
     const now = new Date().toISOString();
     const local = localRecords(), snap = {}, push = [];
     for (const [k, r] of local) {
       snap[k] = recHash(r);
-      if (st.hashes[k] !== snap[k]) push.push({ ...r, updatedAt: now, deleted: false });
+      if (db.syncState.hashes[k] !== snap[k]) push.push({ ...r, updatedAt: now, deleted: false });
     }
-    for (const k of Object.keys(st.hashes)) {
+    for (const k of Object.keys(db.syncState.hashes)) {
       if (!local.has(k)) { const [kind, ...rest] = k.split(':'); push.push({ kind, id: rest.join(':'), data: null, updatedAt: now, deleted: true }); }
     }
     if (push.length) {
       await api('api/push', { method: 'POST', body: { records: push } });
-      for (const r of push) { const k = r.kind + ':' + r.id; if (r.deleted) delete st.hashes[k]; else st.hashes[k] = snap[k]; }
+      for (const r of push) { const k = r.kind + ':' + r.id; if (r.deleted) delete db.syncState.hashes[k]; else db.syncState.hashes[k] = snap[k]; }
     }
-    // 2. pull everything that changed on the server (including our own echo, which is a no-op)
-    const res = await api('api/changes?since=' + st.seq);
-    const applied = [];
-    for (const rec of res.records) {
-      const k = rec.kind + ':' + rec.id;
-      if (recHash(localRecords().get(k)) !== (snap[k] ?? null) && st.hashes[k] !== undefined) continue; // edited during this sync: next round pushes it
-      applyRemote(rec); applied.push(k);
-    }
-    if (applied.length) {
-      db = normalizeDb(db);
-      const after = localRecords();
-      for (const k of applied) { const r = after.get(k); if (r) db.syncState.hashes[k] = recHash(r); else delete db.syncState.hashes[k]; }
-    }
-    db.syncState.seq = res.seq;
     saveDb({ sync: false });
     sync.lastOk = new Date(); sync.lastError = null;
-    const changedOthers = applied.some((k) => recHash(localRecords().get(k)) !== (snap[k] ?? null));
-    if (changedOthers && state.tab !== 'day' && !document.querySelector('form:focus-within')) render();
+    if ((applied.length || settingsMergedFrom) && state.tab !== 'day' && !document.querySelector('form:focus-within')) render();
   } catch (e) {
     sync.lastError = e.message;
     console.warn('Sync failed', e);
