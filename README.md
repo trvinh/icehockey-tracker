@@ -40,3 +40,23 @@ Settings → Export data saves a JSON file (save it to iCloud Drive). Import rep
 iOS may clear website data under storage pressure, so export now and then.
 Team logos (scaled to 96 px PNG) are part of the export. Old v1 exports are converted on import.
 The JSON format (schema version 2) is also the planned import format for a future vinh-hp sync backend.
+
+## Home server with sync (vinh-hp)
+
+The same code also runs as a small self-hosted server: `server/server.py` (Python standard library + SQLite)
+serves the app and a sync API. When the app is opened from the server, it syncs game days, teams, rinks and
+shared settings between devices (offline-first; last write wins per record). Opened from GitHub Pages it
+stays local-only.
+
+```bash
+git clone https://github.com/trvinh/icehockey-tracker /home/vinh/projects/icehockey-tracker
+cd /home/vinh/projects/icehockey-tracker
+deploy/install.sh        # creates .env with a random HOCKEY_TOKEN, builds, starts, enables Funnel on :8443
+```
+
+- Public URL: `https://<machine>.ts.net:8443/` via Tailscale Funnel. All `/api/*` calls need the sync password
+  (`HOCKEY_TOKEN` in `.env`); enter it once per device under Settings → Sync password.
+- `GOOGLE_MAPS_KEY` in `.env` lets the server do distance lookups (key restricted to the Routes API).
+- Data: SQLite in `HOCKEY_DATA_DIR` (default `./data`). Consistent backup: `deploy/backup-db.sh <dest-file>`.
+- Update: `git pull && deploy/install.sh`. Tests: `python3 -m unittest discover -s tests`.
+- Moving from GitHub Pages: Settings → Export in the old app, then Settings → Import in the server app.
