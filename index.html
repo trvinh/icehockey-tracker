@@ -12,12 +12,13 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="topbar">
-    <h1 id="title">Games</h1>
-    <button id="addBtn" class="icon-btn" aria-label="Add game">＋</button>
+    <h1 id="title">Game days</h1>
+    <button id="addBtn" class="icon-btn" aria-label="Add game day">＋</button>
   </header>
 
   <main id="view" aria-live="polite"></main>
@@ -25,11 +26,13 @@
   <nav class="tabbar">
     <button data-tab="games" class="active"><span>🏒</span>Games</button>
     <button data-tab="stats"><span>📊</span>Stats</button>
+    <button data-tab="teams"><span>🛡️</span>Teams</button>
     <button data-tab="stadiums"><span>🏟️</span>Rinks</button>
     <button data-tab="settings"><span>⚙️</span>Settings</button>
   </nav>
 
   <div id="toast" role="status"></div>
+  <script src="vendor/leaflet/leaflet.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
