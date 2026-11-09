@@ -1,0 +1,15 @@
+services:
+  hockeylog:
+    build: .
+    image: hockeylog:latest
+    container_name: hockeylog
+    restart: unless-stopped
+    # Only reachable from this machine; Tailscale (serve/funnel) provides HTTPS in front.
+    ports:
+      - "127.0.0.1:${HOCKEY_HOST_PORT:-8090}:8090"
+    env_file: .env
+    volumes:
+      - ${HOCKEY_DATA_DIR:-./data}:/data
+    logging:
+      driver: json-file
+      options: { max-size: "1m", max-file: "3" }

@@ -19,8 +19,9 @@ const LOGO_PX = 96;
 function emptyDb() {
   return {
     version: SCHEMA_VERSION,
-    settings: { playerName: '', homeAddress: '', homeLat: null, homeLng: null, mapsKey: '', roundTrip: true },
+    settings: { playerName: '', homeAddress: '', homeLat: null, homeLng: null, mapsKey: '', roundTrip: true, syncToken: '' },
     stadiums: [], teams: [], days: [],
+    syncState: { seq: 0, hashes: {} },
   };
 }
 let needsMigrationSave = false;
@@ -37,9 +38,10 @@ function loadDb() {
     return emptyDb();
   }
 }
-function saveDb() {
+function saveDb({ sync = true } = {}) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    if (sync) scheduleSync();
     return true;
   } catch (e) {
     alert('Saving failed (' + e.message + '). Phone storage may be full: try smaller logos, and export a backup from Settings.');
@@ -90,6 +92,7 @@ function normalizeDb(d) {
   return {
     version: SCHEMA_VERSION,
     settings: { ...base.settings, ...(d.settings || {}) },
+    syncState: d.syncState && typeof d.syncState.hashes === 'object' ? { seq: +d.syncState.seq || 0, hashes: { ...d.syncState.hashes } } : base.syncState,
     stadiums: d.stadiums.filter((s) => s && s.id && s.name).map((s) => ({
       id: String(s.id), name: String(s.name), address: String(s.address || ''),
       lat: num(s.lat), lng: num(s.lng),
@@ -192,12 +195,15 @@ async function fetchDrivingRoute(fromAddress, toAddress, apiKey) {
 }
 async function updateStadiumDistance(stadium, { quiet = false } = {}) {
   const { homeAddress, mapsKey } = db.settings;
-  if (!homeAddress || !mapsKey || !stadium.address) {
-    if (!quiet) toast('Set home address and Maps key in Settings first');
+  const viaServer = sync.enabled && sync.routes;
+  if (!homeAddress || (!mapsKey && !viaServer) || !stadium.address) {
+    if (!quiet) toast(viaServer ? 'Set your home address in Settings first' : 'Set home address and Maps key in Settings first');
     return false;
   }
   try {
-    const r = await fetchDrivingRoute(homeAddress, stadium.address, mapsKey);
+    const r = viaServer
+      ? await api('api/route', { method: 'POST', body: { from: homeAddress, to: stadium.address } })
+      : await fetchDrivingRoute(homeAddress, stadium.address, mapsKey);
     Object.assign(stadium, { distanceKm: Math.round(r.km * 10) / 10, durationMin: r.minutes, distanceSource: 'google', distanceFrom: homeAddress });
     if (r.to) Object.assign(stadium, r.to);
     if (r.from) { db.settings.homeLat = r.from.lat; db.settings.homeLng = r.from.lng; }
@@ -601,14 +607,18 @@ function renderSettings(view) {
   view.innerHTML = `<form id="setForm" autocomplete="off">
     <label for="playerName">Player name</label><input id="playerName" value="${esc(st.playerName)}">
     <label for="home">Home address</label><input id="home" value="${esc(st.homeAddress)}" placeholder="Street, postcode, city">
+    ${sync.enabled && sync.routes ? '<p class="hint">Distances are looked up by your home server; no Maps key needed on this device.</p><input id="key" type="hidden" value="' + esc(st.mapsKey) + '">' : `
     <label for="key">Google Maps API key</label><input id="key" value="${esc(st.mapsKey)}" placeholder="AIza…" autocapitalize="off" spellcheck="false">
-    <p class="hint">Needs the Routes API enabled. Restrict the key to this site's address in Google Cloud. The key is stored only on this phone.</p>
+    <p class="hint">Needs the Routes API enabled. Restrict the key to this site's address in Google Cloud. The key is stored only on this device.</p>`}
     <label class="inline"><input id="roundTrip" type="checkbox" ${st.roundTrip ? 'checked' : ''}> Count driving as round trips</label>
     <button class="btn" type="submit">Save settings</button>
     <button class="btn secondary" type="button" id="recalc">Recalculate all rink distances</button>
   </form>
+  ${sync.enabled ? `<h2>Sync</h2><div class="card"><p class="hint" id="syncInfo">${esc(syncStatusText())}</p>
+    ${sync.auth ? `<label for="token">Sync password</label><input id="token" type="password" value="${esc(st.syncToken)}" autocomplete="current-password">` : ''}
+    <button class="btn secondary" type="button" id="syncNow">Sync now</button></div>` : ''}
   <h2>Backup</h2>
-  <p class="hint">Data is stored only in this browser. Export regularly (e.g. to iCloud Drive) to keep a backup.</p>
+  <p class="hint">${sync.enabled ? 'Data is stored on this device and synced to your home server.' : 'Data is stored only in this browser. Export regularly (e.g. to iCloud Drive) to keep a backup.'}</p>
   <button class="btn secondary" id="exportBtn">Export data (JSON)</button>
   <button class="btn secondary" id="importBtn">Import data…</button>
   <input type="file" id="importFile" accept="application/json,.json" hidden>
@@ -619,10 +629,12 @@ function renderSettings(view) {
     const home = $('#home').value.trim();
     const homeChanged = home !== st.homeAddress;
     Object.assign(st, { playerName: $('#playerName').value.trim(), homeAddress: home, mapsKey: $('#key').value.trim(), roundTrip: $('#roundTrip').checked });
+    if ($('#token')) st.syncToken = $('#token').value;
     if (homeChanged) Object.assign(st, { homeLat: null, homeLng: null });
     saveDb();
     toast(homeChanged && db.stadiums.some((s) => s.distanceSource === 'google') ? 'Saved. Home changed: recalculate distances.' : 'Settings saved');
   };
+  if ($('#syncNow')) $('#syncNow').onclick = async () => { await doSync(); toast(sync.lastError ? 'Sync failed: ' + sync.lastError : 'Synced'); render(); };
   $('#recalc').onclick = async (e) => {
     const targets = db.stadiums.filter((s) => s.address && s.distanceSource !== 'manual');
     if (!targets.length) { toast('No rinks with an address to look up'); return; }
@@ -648,15 +660,148 @@ function renderSettings(view) {
     try {
       const data = normalizeDb(JSON.parse(await file.text()));
       if (!confirm(`Replace current data with ${data.days.length} game days, ${data.teams.length} teams and ${data.stadiums.length} rinks from the file?`)) return;
+      data.syncState = { seq: 0, hashes: {} }; // everything counts as new and is pushed to the server
       db = data; saveDb(); toast('Data imported'); render();
     } catch (err) { alert('Import failed: ' + err.message); }
     finally { e.target.value = ''; }
   };
 }
 
+
+// ---------- sync with home server ----------
+/* Offline-first: the device copy is the source of truth for the UI. When the page is served by the
+ * Hockey Log server (it answers api/health), changed records are pushed and other devices' changes
+ * pulled. Change detection compares each record's hash with its hash at the last sync, so no edit
+ * site has to remember to flag changes. Conflicts: last write wins per record (server side). */
+const sync = { enabled: false, routes: false, auth: false, running: false, again: false, lastOk: null, lastError: null, timer: null };
+
+function hashStr(str) { // cyrb53: fast 53-bit string hash, plenty for change detection
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+/** Settings shared across devices (the Maps key and sync password stay on each device). */
+function sharedSettings() {
+  const { mapsKey, syncToken, ...shared } = db.settings; // eslint-disable-line no-unused-vars
+  return shared;
+}
+function localRecords() {
+  const m = new Map();
+  for (const x of db.days) m.set('day:' + x.id, { kind: 'day', id: x.id, data: x });
+  for (const x of db.teams) m.set('team:' + x.id, { kind: 'team', id: x.id, data: x });
+  for (const x of db.stadiums) m.set('stadium:' + x.id, { kind: 'stadium', id: x.id, data: x });
+  m.set('settings:main', { kind: 'settings', id: 'main', data: sharedSettings() });
+  return m;
+}
+const recHash = (r) => (r ? hashStr(JSON.stringify(r.data)) : null);
+
+async function api(path, { method = 'GET', body } = {}) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (db.settings.syncToken) headers.Authorization = 'Bearer ' + db.settings.syncToken;
+  const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(res.status === 401 ? 'wrong or missing sync password (Settings)' : data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function applyRemote(rec) {
+  const lists = { day: 'days', team: 'teams', stadium: 'stadiums' };
+  if (rec.kind === 'settings') {
+    if (!rec.deleted && rec.data) Object.assign(db.settings, rec.data, { mapsKey: db.settings.mapsKey, syncToken: db.settings.syncToken });
+    return;
+  }
+  const key = lists[rec.kind]; if (!key) return;
+  const i = db[key].findIndex((x) => x.id === rec.id);
+  if (rec.deleted) { if (i >= 0) db[key].splice(i, 1); }
+  else if (i >= 0) db[key][i] = rec.data;
+  else db[key].push(rec.data);
+}
+
+async function doSync() {
+  if (!sync.enabled) return;
+  if (sync.running) { sync.again = true; return; }
+  sync.running = true;
+  const st = db.syncState;
+  try {
+    // 1. push local changes since the last sync
+    const now = new Date().toISOString();
+    const local = localRecords(), snap = {}, push = [];
+    for (const [k, r] of local) {
+      snap[k] = recHash(r);
+      if (st.hashes[k] !== snap[k]) push.push({ ...r, updatedAt: now, deleted: false });
+    }
+    for (const k of Object.keys(st.hashes)) {
+      if (!local.has(k)) { const [kind, ...rest] = k.split(':'); push.push({ kind, id: rest.join(':'), data: null, updatedAt: now, deleted: true }); }
+    }
+    if (push.length) {
+      await api('api/push', { method: 'POST', body: { records: push } });
+      for (const r of push) { const k = r.kind + ':' + r.id; if (r.deleted) delete st.hashes[k]; else st.hashes[k] = snap[k]; }
+    }
+    // 2. pull everything that changed on the server (including our own echo, which is a no-op)
+    const res = await api('api/changes?since=' + st.seq);
+    const applied = [];
+    for (const rec of res.records) {
+      const k = rec.kind + ':' + rec.id;
+      if (recHash(localRecords().get(k)) !== (snap[k] ?? null) && st.hashes[k] !== undefined) continue; // edited during this sync: next round pushes it
+      applyRemote(rec); applied.push(k);
+    }
+    if (applied.length) {
+      db = normalizeDb(db);
+      const after = localRecords();
+      for (const k of applied) { const r = after.get(k); if (r) db.syncState.hashes[k] = recHash(r); else delete db.syncState.hashes[k]; }
+    }
+    db.syncState.seq = res.seq;
+    saveDb({ sync: false });
+    sync.lastOk = new Date(); sync.lastError = null;
+    const changedOthers = applied.some((k) => recHash(localRecords().get(k)) !== (snap[k] ?? null));
+    if (changedOthers && state.tab !== 'day' && !document.querySelector('form:focus-within')) render();
+  } catch (e) {
+    sync.lastError = e.message;
+    console.warn('Sync failed', e);
+  } finally {
+    sync.running = false;
+    updateSyncDot();
+    if (sync.again) { sync.again = false; scheduleSync(300); }
+  }
+}
+function scheduleSync(ms = 1500) {
+  if (!sync.enabled) return;
+  clearTimeout(sync.timer); sync.timer = setTimeout(doSync, ms);
+}
+function syncStatusText() {
+  if (sync.lastError) return 'Last sync failed: ' + sync.lastError;
+  if (sync.lastOk) return 'Synced with home server at ' + sync.lastOk.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return 'Connecting to home server…';
+}
+function updateSyncDot() {
+  const dot = $('#syncDot'); if (!dot) return;
+  dot.hidden = !sync.enabled;
+  dot.className = 'sync-dot ' + (sync.lastError ? (navigator.onLine ? 'err' : 'off') : sync.lastOk ? 'ok' : 'off');
+  dot.title = syncStatusText();
+  const info = $('#syncInfo'); if (info) info.textContent = syncStatusText();
+}
+async function initSync() {
+  try {
+    const res = await fetch('api/health', { cache: 'no-store' });
+    const h = res.ok && (res.headers.get('content-type') || '').includes('json') ? await res.json() : null;
+    if (!h || !h.ok) return; // static hosting (e.g. GitHub Pages): local-only mode
+    Object.assign(sync, { enabled: true, routes: !!h.routes, auth: !!h.auth });
+  } catch { return; } // offline at start: try again when the network returns
+  updateSyncDot();
+  if (state.tab === 'settings') render();
+  await doSync();
+  setInterval(() => { if (document.visibilityState === 'visible') doSync(); }, 60000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') doSync(); });
+}
+window.addEventListener('online', () => (sync.enabled ? doSync() : initSync()));
+
 // ---------- boot ----------
 if (needsMigrationSave) saveDb(); // persist a v1 → v2 migration right away (never overwrite unreadable data)
 document.querySelectorAll('.tabbar button').forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
 $('#addBtn').onclick = () => setTab('day', 'new');
 render();
+initSync();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
