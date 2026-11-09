@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 :root {
   --bg: #f4f6fa;
   --card: #ffffff;
@@ -139,3 +140,31 @@ textarea { min-height: 70px; }
 .date-field #datePick { width: 44px; min-height: 44px; flex-shrink: 0; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-size: 18px; }
 .date-field #datePicker { position: absolute; right: 0; bottom: 0; width: 44px; height: 44px; opacity: 0; pointer-events: none; }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
+
+/* map: enlarge + zoom-dependent pins */
+.map-wrap { position: relative; margin-top: 10px; }
+.map-wrap #map { margin-top: 0; }
+.map-full { position: absolute; left: 10px; bottom: 26px; z-index: 500; width: 40px; height: 40px; border-radius: 8px; border: 2px solid rgba(0,0,0,.2); background: #fff; color: #222; font-size: 20px; }
+.map-wrap.fullscreen { position: fixed; inset: 0; z-index: 1000; margin: 0; background: var(--bg); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.map-wrap.fullscreen #map { height: 100%; border-radius: 0; }
+.map-wrap.fullscreen .map-full { bottom: calc(26px + env(safe-area-inset-bottom)); }
+body.map-open { overflow: hidden; }
+body.map-open .tabbar, body.map-open .topbar { visibility: hidden; }
+.rink-pin span { transition: transform .15s; }
+.z-far .rink-pin span { transform: scale(.42); font-size: 0; }
+.z-mid .rink-pin span { transform: scale(.7); font-size: 11px; }
+.z-far .km-label span { font-size: 10px; padding: 0 5px; }
+.leaflet-tooltip.rink-name { display: none; background: var(--card); color: var(--text); border-color: var(--line); font-weight: 600; font-size: 12px; padding: 1px 6px; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.leaflet-tooltip.rink-name::before { display: none; }
+.z-near .leaflet-tooltip.rink-name, .z-mid .leaflet-tooltip.rink-name { display: block; }
+.z-mid .leaflet-tooltip.rink-name { font-size: 10px; }
+.overnight { margin-top: 30px; font-size: 14px; color: var(--text); }
+
+/* teams grid */
+.team-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+.team-tile { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 8px 10px; text-align: center; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.team-tile.open { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.team-tile .tname { font-weight: 700; font-size: 15px; line-height: 1.2; word-break: break-word; }
+.team-tile .tstats { display: flex; gap: 10px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.team-tile .tstats b { display: block; font-size: 17px; color: var(--text); }
+.team-edit { grid-column: 1 / -1; }
