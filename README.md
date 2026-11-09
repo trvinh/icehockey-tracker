@@ -55,7 +55,9 @@ deploy/install.sh        # creates .env with a random HOCKEY_TOKEN, builds, star
 ```
 
 - Public URL: `https://<machine>.ts.net:8443/` via Tailscale Funnel. All `/api/*` calls need the sync password
-  (`HOCKEY_TOKEN` in `.env`); enter it once per device under Settings → Sync password.
+  (`HOCKEY_TOKEN` in `.env`); enter it once per device under Settings → Sync password, or run
+  `deploy/setup-link.sh` on the server and open the printed link once per browser (password after `#`,
+  never sent to the server).
 - `GOOGLE_MAPS_KEY` in `.env` lets the server do distance lookups (key restricted to the Routes API).
 - Data: SQLite in `HOCKEY_DATA_DIR` (default `./data`). Consistent backup: `deploy/backup-db.sh <dest-file>`.
 - Update: `git pull && deploy/install.sh`. Tests: `python3 -m unittest discover -s tests`.

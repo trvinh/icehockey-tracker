@@ -48,10 +48,10 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.call("/api/changes?since=0", token=None)[0], 401)
         self.assertEqual(self.call("/api/changes?since=0", token="wrong-token-wrong-token")[0], 401)
 
-    def test_lockout_after_failures(self):
-        for _ in range(3):
+    def test_wrong_passwords_never_lock_out_the_right_one(self):
+        for _ in range(4):
             self.call("/api/changes?since=0", token="bad")
-        self.assertEqual(self.call("/api/changes?since=0")[0], 401)  # even the right token waits out the window
+        self.assertEqual(self.call("/api/changes?since=0")[0], 200)
 
     def test_push_pull_and_incremental(self):
         st, res = self.call("/api/push", {"records": [self.rec("1", "2026-11-09T10:00:00.000Z")]})
