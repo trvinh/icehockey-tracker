@@ -177,3 +177,14 @@ main.wide { max-width: 1200px; }
   .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
   .split #map { height: 420px; }
 }
+
+/* Section header with a sort switch */
+.h2-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 18px 2px 8px; }
+.h2-row h2 { margin: 0; }
+.seg { display: inline-flex; background: var(--accent-soft); border-radius: 99px; padding: 2px; }
+.seg button { border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 99px; }
+.seg button.on { background: var(--accent); color: #fff; font-weight: 600; }
+/* By type: type totals with league / tournament rows under them */
+.by-type .type-row td { font-weight: 700; border-top: 1px solid var(--line); }
+.by-type .sub-row td { font-size: 14px; color: var(--muted); }
+.by-type .sub-row td:first-child { padding-left: 16px; color: var(--text); }
