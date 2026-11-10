@@ -1,7 +1,7 @@
 'use strict';
 /* Hockey Log — phone-first PWA. All data lives in localStorage on the device.
  * Schema (version 2):
- *   settings: { playerName, homeAddress, homeLat, homeLng, mapsKey, roundTrip }
+ *   settings: { playerName, homeAddress, homeLat, homeLng, mapsKey, roundTrip, seasonStartMonth }
  *   stadiums: [{ id, name, address, lat, lng, distanceKm, durationMin, distanceSource: 'google'|'manual'|null, distanceFrom }]
  *   teams:    [{ id, name, logo: dataURL|null }]
  *   days:     [{ id, date 'YYYY-MM-DD', type, competition, stadiumId,
@@ -20,7 +20,7 @@ const LOGO_PX = 96;
 function emptyDb() {
   return {
     version: SCHEMA_VERSION,
-    settings: { playerName: '', homeAddress: '', homeLat: null, homeLng: null, mapsKey: '', roundTrip: true, syncToken: '' },
+    settings: { playerName: '', homeAddress: '', homeLat: null, homeLng: null, mapsKey: '', roundTrip: true, seasonStartMonth: 8, syncToken: '' },
     stadiums: [], teams: [], days: [],
     syncState: { seq: 0, hashes: {} },
   };
@@ -146,10 +146,12 @@ const teamById = (id) => db.teams.find((t) => t.id === id);
 const teamKey = (name) => name.trim().toLowerCase().replace(/\s+/g, ' ');
 const dayTotals = (d) => d.matches.reduce((a, m) => ({ goals: a.goals + m.goals, assists: a.assists + m.assists }), { goals: 0, assists: 0 });
 
-/** Hockey season runs Aug–Jul, labelled e.g. "2026/27". */
+/** A season starts on the 1st of the month set in Settings (default August), labelled e.g. "2026/27". */
 function seasonOf(iso) {
   const y = +iso.slice(0, 4), m = +iso.slice(5, 7);
-  const start = m >= 8 ? y : y - 1;
+  const first = Math.min(12, Math.max(1, Math.floor(+db.settings.seasonStartMonth) || 8));
+  if (first === 1) return String(y);
+  const start = m >= first ? y : y - 1;
   return `${start}/${String((start + 1) % 100).padStart(2, '0')}`;
 }
 function toast(msg) {
@@ -248,8 +250,11 @@ function computeStats(days) {
     const t = dayTotals(d), ds = entryDates(d);
     ds.forEach((x) => dates.add(x));
     goals += t.goals; assists += t.assists;
-    const b = byType.get(d.type) || { days: new Set(), goals: 0, assists: 0 };
+    const b = byType.get(d.type) || { days: new Set(), goals: 0, assists: 0, subs: new Map() };
     ds.forEach((x) => b.days.add(x)); b.goals += t.goals; b.assists += t.assists; byType.set(d.type, b);
+    const name = d.competition.trim() || '(no name)';
+    const sub = b.subs.get(name) || { name, days: new Set(), goals: 0, assists: 0 };
+    ds.forEach((x) => sub.days.add(x)); sub.goals += t.goals; sub.assists += t.assists; b.subs.set(name, sub);
     for (const m of d.matches) {
       if (!m.teamId) continue;
       const o = opp.get(m.teamId) || { teamId: m.teamId, games: 0, goals: 0, assists: 0 };
@@ -270,7 +275,7 @@ function computeStats(days) {
   }
   return {
     days: dates.size, goals, assists, points: goals + assists,
-    opponents: [...opp.values()].sort((a, b) => (b.goals + b.assists) - (a.goals + a.assists) || b.games - a.games),
+    opponents: [...opp.values()],
     rinks: [...rinks.values()].sort((a, b) => b.days.size - a.days.size),
     trips: trips.size, km, missing, byType,
   };
@@ -567,17 +572,28 @@ function renderStats(view) {
   let html = filterControls() + '<div style="height:10px"></div><div class="kpis four">' +
     kpi(s.days, 'game days') + kpi(s.goals, 'goals') + kpi(s.assists, 'assists') + kpi(s.points, 'points') + '</div>';
 
-  if (s.byType.size > 1) {
-    html += '<h2>By type</h2><div class="card"><table><tr><th>Type</th><th>Days</th><th>G</th><th>A</th></tr>' +
-      [...s.byType].map(([t, b]) => `<tr><td>${esc(t)}</td><td>${b.days.size}</td><td>${b.goals}</td><td>${b.assists}</td></tr>`).join('') + '</table></div>';
+  if (s.byType.size) {
+    const row = (cls, label, b) => `<tr class="${cls}"><td>${label}</td><td>${b.days.size}</td><td>${b.goals}</td><td>${b.assists}</td></tr>`;
+    const types = GAME_TYPES.filter((t) => s.byType.has(t)).concat([...s.byType.keys()].filter((t) => !GAME_TYPES.includes(t)));
+    html += '<h2>By type</h2><div class="card"><table class="by-type"><tr><th>Type</th><th>Days</th><th>G</th><th>A</th></tr>' +
+      types.map((t) => { const b = s.byType.get(t);
+        const subs = [...b.subs.values()].sort((x, y) => y.days.size - x.days.size || x.name.localeCompare(y.name));
+        return row('type-row', esc(t), b) + subs.map((x) => row('sub-row', esc(x.name), x)).join(''); }).join('') + '</table>' +
+      '<p class="hint">Grouped by the league / tournament name you enter on each game day.</p></div>';
   }
 
-  html += '<h2>Opponents</h2><div class="card"><table><tr><th>Team</th><th>Games</th><th>G</th><th>A</th></tr>' +
-    s.opponents.map((o) => { const t = teamById(o.teamId); return `<tr><td><span class="team-cell">${teamBadge(t, 28)}${esc(t ? t.name : '?')}</span></td><td>${o.games}</td><td>${o.goals}</td><td>${o.assists}</td></tr>`; }).join('') + '</table>' +
+  const oppSort = state.oppSort || 'games';
+  const keys = { games: ['games', 'goals', 'assists'], goals: ['goals', 'assists', 'games'], assists: ['assists', 'goals', 'games'] }[oppSort];
+  const opponents = [...s.opponents].sort((a, b) => { for (const k of keys) if (b[k] !== a[k]) return b[k] - a[k]; return 0; });
+  const seg = (id, opts, cur) => `<div class="seg" id="${id}">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${v === cur ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  html += `<div class="h2-row"><h2>Opponents</h2>${seg('oppSort', [['games', 'Games'], ['goals', 'Goals'], ['assists', 'Assists']], oppSort)}</div>` +
+    '<div class="card"><table><tr><th>Team</th><th>Games</th><th>G</th><th>A</th></tr>' +
+    opponents.map((o) => { const t = teamById(o.teamId); return `<tr><td><span class="team-cell">${teamBadge(t, 28)}${esc(t ? t.name : '?')}</span></td><td>${o.games}</td><td>${o.goals}</td><td>${o.assists}</td></tr>`; }).join('') + '</table>' +
     '<p class="hint">Add team logos in the Teams tab.</p></div>';
 
   view.innerHTML = html;
   bindFilters();
+  view.querySelectorAll('#oppSort button').forEach((b) => (b.onclick = () => { state.oppSort = b.dataset.v; render(); }));
 }
 
 function renderTeams(view) {
@@ -648,7 +664,8 @@ function renderTeams(view) {
 function renderStadiums(view) {
   const used = new Map();
   for (const d of db.days) if (d.stadiumId) used.set(d.stadiumId, (used.get(d.stadiumId) || 0) + 1);
-  const list = [...db.stadiums].sort((a, b) => a.name.localeCompare(b.name));
+  const dir = state.rinkSort === 'desc' ? -1 : 1;
+  const list = [...db.stadiums].sort((a, b) => (a.distanceKm == null) - (b.distanceKm == null) || dir * ((a.distanceKm ?? 0) - (b.distanceKm ?? 0)) || a.name.localeCompare(b.name));
   const st = computeStats(filteredDays());
   const kpi = (v, l) => `<div class="kpi"><b>${v}</b><small>${l}</small></div>`;
   let html = '<div class="split"><section>';
@@ -657,7 +674,7 @@ function renderStadiums(view) {
     ${st.missing ? `<p class="hint">${st.missing} trip(s) have no distance yet: set it on the rink.</p>` : ''}
     <div class="map-wrap"><div id="map"></div><button type="button" class="map-full" aria-label="Enlarge map">⛶</button></div>
   </div>` : '<h2>Driving</h2><div class="empty">Driving stats appear once you have added game days.</div>';
-  html += '</section><section><h2>Rinks</h2><p class="hint">Distances are one way from home. Tap a rink to edit, set the distance by hand, or look it up again (needed for the map).</p>';
+  html += `</section><section><div class="h2-row"><h2>Rinks</h2><div class="seg" id="rinkSort"><button type="button" data-v="asc" class="${dir > 0 ? 'on' : ''}">Nearest first</button><button type="button" data-v="desc" class="${dir < 0 ? 'on' : ''}">Farthest first</button></div></div>` + '<p class="hint">Distances are one way from home. Tap a rink to edit, set the distance by hand, or look it up again (needed for the map).</p>';
   if (!list.length) html += '<div class="empty">Rinks are added when you enter a game day.</div>';
   for (const s of list) {
     const open = state.editing === s.id;
@@ -674,6 +691,7 @@ function renderStadiums(view) {
   }
   view.innerHTML = html + '</section></div>';
   if (db.days.length) { bindFilters(); renderMap($('#map'), st.rinks); }
+  view.querySelectorAll('#rinkSort button').forEach((b) => (b.onclick = () => { state.rinkSort = b.dataset.v; render(); }));
   view.querySelectorAll('.game').forEach((el) => (el.onclick = () => { state.editing = state.editing === el.dataset.id ? null : el.dataset.id; render(); }));
   const form = view.querySelector('.rinkForm');
   if (!form) return;
@@ -706,6 +724,9 @@ function renderSettings(view) {
     <label for="key">Google Maps API key</label><input id="key" value="${esc(st.mapsKey)}" placeholder="AIza…" autocapitalize="off" spellcheck="false">
     <p class="hint">Needs the Routes API enabled. Restrict the key to this site's address in Google Cloud. The key is stored only on this device.</p>`}
     <label class="inline"><input id="roundTrip" type="checkbox" ${st.roundTrip ? 'checked' : ''}> Count driving as round trips</label>
+    <label for="seasonStart">Season starts in</label>
+    <select id="seasonStart">${['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map((n, i) => `<option value="${i + 1}" ${i + 1 === (+st.seasonStartMonth || 8) ? 'selected' : ''}>${n}</option>`).join('')}</select>
+    <p class="hint">Game days from the 1st of this month on count toward the next season (e.g. August → season 2026/27 runs 01.08.2026 – 31.07.2027).</p>
     <button class="btn" type="submit">Save settings</button>
     <button class="btn secondary" type="button" id="recalc">Recalculate all rink distances</button>
   </form>
@@ -724,7 +745,7 @@ function renderSettings(view) {
     e.preventDefault();
     const home = $('#home').value.trim();
     const homeChanged = home !== st.homeAddress;
-    Object.assign(st, { playerName: $('#playerName').value.trim(), homeAddress: home, mapsKey: $('#key').value.trim(), roundTrip: $('#roundTrip').checked });
+    Object.assign(st, { playerName: $('#playerName').value.trim(), homeAddress: home, mapsKey: $('#key').value.trim(), roundTrip: $('#roundTrip').checked, seasonStartMonth: +$('#seasonStart').value });
     if ($('#token') && $('#token').value.trim()) st.syncToken = $('#token').value.trim();
     if (homeChanged) Object.assign(st, { homeLat: null, homeLng: null });
     saveDb();
