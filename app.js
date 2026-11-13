@@ -460,7 +460,14 @@ function renderDayForm(view) {
     : db.days.find((x) => x.id === state.editing);
   if (!d) return setTab('games');
   const stadiums = [...db.stadiums].sort((a, b) => a.name.localeCompare(b.name));
-  const comps = [...new Set(db.days.map((x) => x.competition).filter(Boolean))].sort();
+  // Existing league / tournament names with their type and last use, newest first.
+  const compMap = new Map();
+  for (const x of db.days) {
+    const n = (x.competition || '').trim(); if (!n) continue;
+    const c = compMap.get(n.toLowerCase());
+    if (!c || x.date > c.last) compMap.set(n.toLowerCase(), { name: n, type: x.type, last: x.date });
+  }
+  const comps = [...compMap.values()].sort((a, b) => b.last.localeCompare(a.last));
   view.innerHTML = `<form id="dayForm" autocomplete="off">
     <div class="row">
       <div><label for="date">Date</label><div class="inline date-field"><input id="date" inputmode="numeric" required placeholder="DD.MM.YYYY" value="${esc(deDate(d.date))}"><button type="button" id="datePick" aria-label="Pick date">📅</button><input id="datePicker" type="date" tabindex="-1" aria-hidden="true" value="${esc(d.date)}"></div></div>
@@ -471,8 +478,11 @@ function renderDayForm(view) {
       <div><label class="inline overnight" id="overnightWrap" ${(d.dayCount || 1) > 1 ? '' : 'hidden'}><input id="overnight" type="checkbox" ${d.overnight ? 'checked' : ''}> Stayed overnight (one trip)</label></div>
     </div>
     <label for="competition">League / tournament name</label>
-    <input id="competition" list="compList" value="${esc(d.competition)}" placeholder="e.g. U11 Regional League">
-    <datalist id="compList">${comps.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+    <div class="combo">
+      <input id="competition" value="${esc(d.competition)}" placeholder="Pick one or type a new name" autocomplete="off" autocorrect="off">
+      ${comps.length ? '<button type="button" class="combo-btn" id="compBtn" aria-label="Show saved names" tabindex="-1">▾</button>' : ''}
+      <div class="combo-list" id="compMenu" role="listbox" hidden></div>
+    </div>
     <label for="stadium">Rink</label>
     <select id="stadium"><option value="">— choose —</option>${stadiums.map((s) => `<option value="${esc(s.id)}" ${s.id === d.stadiumId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}<option value="__new">＋ New rink…</option></select>
     <div id="newRink" hidden>
@@ -521,6 +531,31 @@ function renderDayForm(view) {
   }
   $('#type').addEventListener('change', syncMultiDay);
   $('#dayCount').addEventListener('input', syncMultiDay);
+
+  // League / tournament name: a text field with a tap-to-open list of names used before.
+  const compIn = $('#competition'), compMenu = $('#compMenu');
+  function showComps(all) {
+    const q = all ? '' : compIn.value.trim().toLowerCase(), type = $('#type').value;
+    const hits = comps.filter((c) => !q || c.name.toLowerCase().includes(q))
+      .sort((a, b) => (b.type === type) - (a.type === type) || b.last.localeCompare(a.last));
+    if (!hits.length || (hits.length === 1 && hits[0].name.toLowerCase() === q)) { compMenu.hidden = true; return; }
+    compMenu.innerHTML = hits.map((c) => `<button type="button" role="option" data-name="${esc(c.name)}" data-type="${esc(c.type)}">${esc(c.name)}${c.type !== type ? `<small>${esc(c.type)}</small>` : ''}</button>`).join('');
+    compMenu.hidden = false;
+  }
+  compIn.addEventListener('focus', () => showComps(true));
+  compIn.addEventListener('input', () => showComps(false));
+  compIn.addEventListener('blur', () => setTimeout(() => { compMenu.hidden = true; }, 150));
+  compIn.addEventListener('keydown', (e) => { if (e.key === 'Escape') compMenu.hidden = true; });
+  if ($('#compBtn')) $('#compBtn').addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (compMenu.hidden) { compIn.focus(); showComps(true); } else compMenu.hidden = true;
+  });
+  compMenu.addEventListener('pointerdown', (e) => e.preventDefault()); // keep focus so the tap lands
+  compMenu.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-name]'); if (!b) return;
+    compIn.value = b.dataset.name; compMenu.hidden = true; compIn.blur();
+    if (GAME_TYPES.includes(b.dataset.type) && $('#type').value !== b.dataset.type) { $('#type').value = b.dataset.type; syncMultiDay(); }
+  });
   // Typed field shows DD.MM.YYYY; the hidden native picker offers a calendar.
   $('#datePick').onclick = () => {
     const iso = parseDeDate($('#date').value); if (iso) $('#datePicker').value = iso;
