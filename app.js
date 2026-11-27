@@ -444,7 +444,7 @@ function stepper(cls, value) {
 function matchRow(m = { teamId: null, goals: 0, assists: 0 }) {
   const t = teamById(m.teamId);
   return `<div class="match-row card">
-    <div class="inline"><input class="m-team" list="teamList" placeholder="Opponent team" value="${esc(t ? t.name : '')}"><button type="button" class="remove" aria-label="Remove opponent">✕</button></div>
+    <div class="inline"><div class="combo"><input class="m-team" placeholder="Pick or type a team" value="${esc(t ? t.name : '')}" autocomplete="off" autocorrect="off">${db.teams.length ? '<button type="button" class="combo-btn m-team-btn" aria-label="Show teams" tabindex="-1">▾</button>' : ''}<div class="combo-list" role="listbox" hidden></div></div><button type="button" class="remove" aria-label="Remove opponent">✕</button></div>
     <div class="row">
       <div><label>Goals</label>${stepper('m-goals', m.goals)}</div>
       <div><label>Assists</label>${stepper('m-assists', m.assists)}</div>
@@ -490,7 +490,6 @@ function renderDayForm(view) {
       <label for="rinkAddr">Address (for Google Maps)</label><input id="rinkAddr" placeholder="Street, city">
     </div>
     <h2>Opponents</h2>
-    <datalist id="teamList">${[...db.teams].sort((a, b) => a.name.localeCompare(b.name)).map((t) => `<option value="${esc(t.name)}">`).join('')}</datalist>
     <div id="matches">${(d.matches.length ? d.matches : [{ teamId: null, goals: 0, assists: 0 }]).map(matchRow).join('')}</div>
     <button class="btn secondary" type="button" id="addMatch">＋ Add opponent</button>
     <p class="hint" id="dayTotal"></p>
@@ -518,6 +517,40 @@ function renderDayForm(view) {
     if (rm) { rm.closest('.match-row').remove(); updateTotal(); }
   });
   form.addEventListener('input', updateTotal);
+  // Opponent: a text field with a tap-to-open list of known teams (recently played first, logos shown).
+  const lastPlayed = new Map();
+  for (const x of db.days) for (const m of x.matches) if (m.teamId && !(lastPlayed.get(m.teamId) > x.date)) lastPlayed.set(m.teamId, x.date);
+  const teamsByRecent = [...db.teams].sort((a, b) => (lastPlayed.get(b.id) || '').localeCompare(lastPlayed.get(a.id) || '') || a.name.localeCompare(b.name));
+  function showTeams(inp, all) {
+    const menu = inp.parentElement.querySelector('.combo-list');
+    const q = all ? '' : inp.value.trim().toLowerCase();
+    const taken = new Set([...form.querySelectorAll('.m-team')].filter((x) => x !== inp).map((x) => x.value.trim().toLowerCase()).filter(Boolean));
+    const hits = teamsByRecent.filter((t) => !taken.has(t.name.toLowerCase()) && (!q || t.name.toLowerCase().includes(q)));
+    if (!hits.length || (hits.length === 1 && hits[0].name.toLowerCase() === q)) { menu.hidden = true; return; }
+    menu.innerHTML = hits.map((t) => `<button type="button" role="option" data-name="${esc(t.name)}"><span class="team-cell">${teamBadge(t, 24)}${esc(t.name)}</span></button>`).join('');
+    menu.hidden = false;
+  }
+  const matchesEl = $('#matches');
+  matchesEl.addEventListener('focusin', (e) => { if (e.target.matches('.m-team')) showTeams(e.target, true); });
+  matchesEl.addEventListener('input', (e) => { if (e.target.matches('.m-team')) showTeams(e.target, false); });
+  matchesEl.addEventListener('focusout', (e) => {
+    if (!e.target.matches('.m-team')) return;
+    const menu = e.target.parentElement.querySelector('.combo-list'); setTimeout(() => { menu.hidden = true; }, 150);
+  });
+  matchesEl.addEventListener('keydown', (e) => { if (e.key === 'Escape' && e.target.matches('.m-team')) e.target.parentElement.querySelector('.combo-list').hidden = true; });
+  matchesEl.addEventListener('pointerdown', (e) => {
+    const btn = e.target.closest('.m-team-btn');
+    if (btn) {
+      e.preventDefault();
+      const inp = btn.parentElement.querySelector('.m-team'), menu = btn.parentElement.querySelector('.combo-list');
+      if (menu.hidden) { inp.focus(); showTeams(inp, true); } else menu.hidden = true;
+    } else if (e.target.closest('.combo-list')) e.preventDefault(); // keep focus so the tap lands
+  });
+  matchesEl.addEventListener('click', (e) => {
+    const b = e.target.closest('.combo-list button[data-name]'); if (!b) return;
+    const inp = b.closest('.combo').querySelector('.m-team');
+    inp.value = b.dataset.name; b.closest('.combo-list').hidden = true; inp.blur();
+  });
   $('#addMatch').onclick = () => {
     $('#matches').insertAdjacentHTML('beforeend', matchRow());
     $('#matches').lastElementChild.querySelector('.m-team').focus();
