@@ -199,3 +199,5 @@ main.wide { max-width: 1200px; }
 .combo-list button:last-child { border-bottom: 0; }
 .combo-list button:active { background: var(--accent-soft); }
 .combo-list small { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.match-row .combo { flex: 1; min-width: 0; }
+.combo-list .team-cell { font-weight: 500; }
